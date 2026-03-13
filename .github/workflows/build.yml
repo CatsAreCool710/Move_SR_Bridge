@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -45,6 +48,5 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: Move-SR-Bridge.zip
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
