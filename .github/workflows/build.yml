@@ -24,7 +24,7 @@ jobs:
         run: pip install pyinstaller
 
       - name: Build sr_helper.exe
-        run: python scripts/build.py
+        run: python scripts/build.py --yes
         env:
           PYINSTALLER_QUIET: 1
 

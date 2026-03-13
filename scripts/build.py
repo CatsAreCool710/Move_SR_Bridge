@@ -19,7 +19,8 @@ Build sr_helper.exe using PyInstaller.
 Part of the Move-SR-Bridge project.
 
 Usage:
-    python scripts/build.py
+    python scripts/build.py         # Interactive (prompts for confirmation)
+    python scripts/build.py --yes    # Non-interactive (skip prompts)
 
 Run from the project root directory (Move-SR-Bridge/).
 Requires PyInstaller:  pip install pyinstaller
@@ -38,12 +39,17 @@ BUILD_DIR = os.path.join(PROJECT_ROOT, "build")
 
 
 def main():
+    # Check for --yes flag
+    yes_mode = "--yes" in sys.argv or "-y" in sys.argv
+
     print("Move-SR-Bridge Builder")
     print("=" * 40)
     print()
 
     if not os.path.exists(HELPER_SRC):
         print(f"ERROR: {HELPER_SRC} not found.")
+        if not yes_mode:
+            input("\nPress Enter to exit...")
         sys.exit(1)
 
     # Check PyInstaller is available
@@ -52,7 +58,8 @@ def main():
     except ImportError:
         print("ERROR: PyInstaller is not installed.")
         print("  Install it with:  pip install pyinstaller")
-        input("\nPress Enter to exit...")
+        if not yes_mode:
+            input("\nPress Enter to exit...")
         sys.exit(1)
 
     # Estimate output size (will be ~8-10 MB)
@@ -62,12 +69,16 @@ def main():
     print(f"  Estimated size: ~9 MB")
     print()
 
-    # Prompt for confirmation
-    confirm = input("Press Enter to build, or any other key to cancel: ")
-    if confirm != "":
-        print("\nBuild cancelled.")
-        input("\nPress Enter to exit...")
-        sys.exit(0)
+    if not yes_mode:
+        # Prompt for confirmation
+        confirm = input("Press Enter to build, or any other key to cancel: ")
+        if confirm != "":
+            print("\nBuild cancelled.")
+            input("\nPress Enter to exit...")
+            sys.exit(0)
+    else:
+        print("Running in non-interactive mode (--yes flag detected)")
+        print()
 
     print("\nBuilding sr_helper.exe ...")
     print("-" * 40)
@@ -92,7 +103,8 @@ def main():
 
     if result.returncode != 0:
         print("\nERROR: PyInstaller build failed.")
-        input("\nPress Enter to exit...")
+        if not yes_mode:
+            input("\nPress Enter to exit...")
         sys.exit(1)
 
     # Copy the built exe into the package directory
@@ -102,7 +114,8 @@ def main():
         shutil.copy2(built_exe, dest_exe)
     else:
         print(f"\nWARNING: Expected {built_exe} but it was not found.")
-        input("\nPress Enter to exit...")
+        if not yes_mode:
+            input("\nPress Enter to exit...")
         sys.exit(1)
 
     size_mb = os.path.getsize(dest_exe) / 1024 / 1024
@@ -120,7 +133,8 @@ def main():
     print("  2. Or use scripts\\install_from_source.bat for source-only")
     print()
 
-    input("Press Enter to exit...")
+    if not yes_mode:
+        input("Press Enter to exit...")
 
 
 if __name__ == "__main__":
