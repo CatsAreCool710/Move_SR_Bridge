@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout code
@@ -16,7 +18,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
 
       - name: Install PyInstaller
         run: pip install pyinstaller
@@ -28,21 +30,14 @@ jobs:
 
       - name: Create distribution zip
         run: |
-          # Create a clean staging directory
           $staging = "${{ github.workspace }}/staging"
           New-Item -ItemType Directory -Force -Path $staging
 
-          # Copy Move_SR_Bridge folder
           Copy-Item -Recurse -Force "${{ github.workspace }}/Move_SR_Bridge" "$staging/"
-
-          # Copy scripts folder
           Copy-Item -Recurse -Force "${{ github.workspace }}/scripts" "$staging/"
-
-          # Copy README and LICENSE
           Copy-Item "${{ github.workspace }}/README.md" "$staging/"
           Copy-Item "${{ github.workspace }}/LICENSE" "$staging/"
 
-          # Create zip
           Compress-Archive -Path "$staging/*" -DestinationPath "${{ github.workspace }}/Move-SR-Bridge.zip"
 
       - name: Upload Release Asset

@@ -3,6 +3,10 @@
 Screen reader support for the Ableton Move hardware controller when
 connected to Ableton Live as a control surface.
 
+## Downloads
+
+Pre-built releases are available on the [Releases page](https://github.com/CatsAreCool710/Move_SR_Bridge/releases).
+
 ## Introduction
 
 I got an Ableton Move a few weeks ago and already really love this thing. It has forced me to think in new ways due to its limitations. One of the main reasons I bought it was to also control Live. I was sad to discover anything you do does not speak. Not the scale menus for the pads, parameters, or notifications.
@@ -242,7 +246,7 @@ python sr_helper.py
 
 ## AI Assistance & Security
 
-This project was developed with AI assistance (Claude by Anthropic) under
+This project was developed with AI assistance (Claude by Anthropic via opencode) under
 human direction and review. While care has been taken to ensure correctness,
 AI-generated code may contain errors or security vulnerabilities. Users
 should review the source code and use this software at their own risk. No
