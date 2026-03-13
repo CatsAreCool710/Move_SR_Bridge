@@ -1,0 +1,55 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build sr_helper.exe
+        run: python scripts/build.py
+        env:
+          PYINSTALLER_QUIET: 1
+
+      - name: Create distribution zip
+        run: |
+          # Create a clean staging directory
+          $staging = "${{ github.workspace }}/staging"
+          New-Item -ItemType Directory -Force -Path $staging
+
+          # Copy Move_SR_Bridge folder
+          Copy-Item -Recurse -Force "${{ github.workspace }}/Move_SR_Bridge" "$staging/"
+
+          # Copy scripts folder
+          Copy-Item -Recurse -Force "${{ github.workspace }}/scripts" "$staging/"
+
+          # Copy README and LICENSE
+          Copy-Item "${{ github.workspace }}/README.md" "$staging/"
+          Copy-Item "${{ github.workspace }}/LICENSE" "$staging/"
+
+          # Create zip
+          Compress-Archive -Path "$staging/*" -DestinationPath "${{ github.workspace }}/Move-SR-Bridge.zip"
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: Move-SR-Bridge.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
