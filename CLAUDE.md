@@ -36,13 +36,15 @@ scripts/
   build.py               PyInstaller build script
   install.bat            Batch installer (copies to Live's MIDI Remote Scripts)
   install_from_source.bat  Installs without .exe
+  uninstall.bat          Batch uninstaller (removes from Live's MIDI Remote Scripts)
   start_helper.bat       Manual helper launcher with visible console
 ```
 
 ## Build & Deploy
 
 - Build exe: `python scripts/build.py` (requires `pip install pyinstaller`)
-- Deploy to Live: `scripts/install.bat` (auto-detects Live 12 path)
+- Deploy to Live: `scripts/install.bat` (detects all Live 12 installations, prompts for selection)
+- Uninstall: `scripts/uninstall.bat` (removes from selected Live 12 installation)
 - Live MIDI Remote Scripts path: `C:\ProgramData\Ableton\Live 12 Suite\Resources\MIDI Remote Scripts\Move_SR_Bridge\`
 - Live log: `C:\Users\seash\AppData\Roaming\Ableton\Live 12.3.6\Preferences\Log.txt`
 - Helper log: `Move_SR_Bridge.log` (written next to sr_helper.exe at runtime)

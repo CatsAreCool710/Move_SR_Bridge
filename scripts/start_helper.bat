@@ -25,7 +25,7 @@ echo The helper will listen on 127.0.0.1:8765 and forward speech/braille
 echo to your active screen reader (NVDA, JAWS, ZoomText, etc.).
 echo.
 
-REM --- Find sr_helper.py ---
+REM --- Find sr_helper.py in project source first ---
 set "HELPER="
 
 set "SCRIPT_PATH=%~dp0"
@@ -37,21 +37,61 @@ if exist "%SOURCE_HELPER%" (
     goto :found
 )
 
-REM Check deployed location
+REM --- Fall back to deployed location: enumerate Live installations ---
+set "COUNT=0"
 for /d %%D in ("C:\ProgramData\Ableton\Live 12*") do (
     set "CANDIDATE=%%D\Resources\MIDI Remote Scripts\Move_SR_Bridge\sr_helper.py"
     if exist "!CANDIDATE!" (
-        set "HELPER=!CANDIDATE!"
-        goto :found
+        set /a COUNT+=1
+        set "HELPER_!COUNT!=!CANDIDATE!"
+        for %%N in ("%%D") do set "NAME_!COUNT!=%%~nxN"
     )
 )
 
-echo ERROR: Cannot find sr_helper.py
-echo Checked:
-echo   %SOURCE_HELPER%
-echo   C:\ProgramData\Ableton\Live 12*\Resources\MIDI Remote Scripts\Move_SR_Bridge\
-pause
-exit /b 1
+if %COUNT%==0 (
+    echo ERROR: Cannot find sr_helper.py
+    echo Checked:
+    echo   %SOURCE_HELPER%
+    echo   C:\ProgramData\Ableton\Live 12*\Resources\MIDI Remote Scripts\Move_SR_Bridge\
+    pause
+    exit /b 1
+)
+
+if %COUNT%==1 (
+    set "HELPER=!HELPER_1!"
+    echo Detected: !NAME_1!
+    goto :found
+)
+
+REM Multiple installations found
+echo Multiple Ableton Live installations with Move-SR-Bridge found:
+for /l %%I in (1,1,%COUNT%) do (
+    echo   %%I. !NAME_%%I!
+)
+echo.
+
+REM Check for command-line argument
+if not "%~1"=="" (
+    set "SEL=%~1"
+    echo Using command-line selection: !SEL!
+    goto :validate_helper
+)
+
+set /p SEL="Select version [1-%COUNT%]: "
+
+:validate_helper
+REM Validate selection
+set "VALID=0"
+for /l %%I in (1,1,%COUNT%) do (
+    if "!SEL!"=="%%I" set "VALID=1"
+)
+if "!VALID!"=="0" (
+    echo ERROR: Invalid selection "!SEL!". Please enter 1-%COUNT%.
+    pause
+    exit /b 1
+)
+
+set "HELPER=!HELPER_%SEL%!"
 
 :found
 echo Using: %HELPER%

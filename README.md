@@ -56,6 +56,7 @@ Move-SR-Bridge/
     build.py                           PyInstaller build script
     install.bat                        Batch installer (pre-built)
     install_from_source.bat            Batch installer (source only)
+    uninstall.bat                      Batch uninstaller
     start_helper.bat                   Manual helper launcher
 ```
 
@@ -124,6 +125,25 @@ helper from source using system Python:
 4. When Live unloads the script, it will **not** shut down a
    manually-started helper. Close the console window yourself, or
    press Ctrl+C.
+
+## Uninstallation
+
+To remove Move-SR-Bridge from Ableton Live:
+
+1. Open a Command Prompt (you may need **Run as Administrator**).
+2. Navigate to the project directory.
+3. Run:
+   ```
+   scripts\uninstall.bat
+   ```
+4. If multiple Live installations are detected (e.g., Suite and Beta),
+   you will be prompted to select which one to uninstall from, or
+   choose **A** to uninstall from all of them.
+5. Confirm removal for each selected installation.
+
+The uninstaller will automatically terminate any running `sr_helper.exe`
+process before removing files. You can also pass a selection on the
+command line to skip the interactive prompt (e.g., `scripts\uninstall.bat A`).
 
 ## Building From Source
 
