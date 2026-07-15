@@ -16,10 +16,15 @@ OLED display -- menus, parameter names, values, and notifications -- and
 sends it to your screen reader for speech and braille output. The OLED
 display continues to function normally.
 
+**Note:** This project does not add any features to the Move -- it
+merely intercepts whatever text the Move sends to its OLED and speaks
+it. What you hear is exactly what you see on the display.
+
 ## Supported Screen Readers
 
-Via the [Tolk](https://github.com/ndarilek/tolk) abstraction library,
-Move-SR-Bridge supports:
+### Windows
+
+Via the [Tolk](https://github.com/ndarilek/tolk) abstraction library:
 
 - **NVDA**
 - **JAWS**
@@ -30,12 +35,28 @@ Move-SR-Bridge supports:
 Tolk automatically detects which screen reader is running and routes
 speech and braille output accordingly.
 
+### macOS
+
+- **VoiceOver** (macOS Tahoe 26 or later) -- speaks via AppleScript.
+  Braille output to connected displays is handled automatically by
+  VoiceOver.
+
 ## Requirements
+
+### Windows
 
 - **Windows** (64-bit)
 - **Ableton Live 12** (tested with 12.3.6)
 - **Ableton Move** (connected via USB)
 - A supported **screen reader** (running)
+
+### macOS
+
+- **macOS Tahoe 26** or later
+- **Ableton Live 12**
+- **Ableton Move** (connected via USB)
+- **VoiceOver** enabled (Cmd+F5), with "Allow VoiceOver to be controlled
+  with AppleScript" turned on in VoiceOver Utility > General
 
 ## Project Structure
 
@@ -47,24 +68,29 @@ Move-SR-Bridge/
   Move_SR_Bridge/                      The MIDI Remote Script package
     __init__.py                        Remote script entry point
     sr_bridge.py                       TCP socket client (runs in Live)
-    sr_helper.py                       Helper process source code
-    sr_helper.exe                      Compiled helper (PyInstaller)
-    Tolk.dll                           Tolk screen reader library
-    nvdaControllerClient64.dll         NVDA companion DLL (used by Tolk)
+    sr_helper.py                       Helper process source (cross-platform)
+    sr_helper.exe                      Compiled helper -- Windows (PyInstaller)
+    sr_helper_mac                      Compiled helper -- macOS (PyInstaller)
+    Tolk.dll                           Tolk screen reader library (Windows)
+    nvdaControllerClient64.dll         NVDA companion DLL (Windows)
 
   scripts/                             Build and install scripts
-    build.py                           PyInstaller build script
-    install.bat                        Batch installer (pre-built)
-    install_from_source.bat            Batch installer (source only)
-    uninstall.bat                      Batch uninstaller
-    start_helper.bat                   Manual helper launcher
+    build.py                           PyInstaller build script (Windows)
+    build_mac.py                       PyInstaller build script (macOS)
+    install.bat                        Batch installer (Windows)
+    install_from_source.bat            Batch installer, source only (Windows)
+    uninstall.bat                      Batch uninstaller (Windows)
+    start_helper.bat                   Manual helper launcher (Windows)
+    install_mac.sh                     Shell installer (macOS)
+    uninstall_mac.sh                   Shell uninstaller (macOS)
+    start_helper_mac.sh                Manual helper launcher (macOS)
 ```
 
 ## Installation
 
-There are two ways to install Move-SR-Bridge.
+### Windows
 
-### Method 1: Batch Installer (Recommended)
+#### Method 1: Batch Installer (Recommended)
 
 1. Open a Command Prompt (you may need **Run as Administrator** since
    the MIDI Remote Scripts directory is under `C:\ProgramData`).
@@ -76,7 +102,7 @@ There are two ways to install Move-SR-Bridge.
 4. The script will show you what will be copied and ask for confirmation.
 5. Follow the on-screen instructions.
 
-### Method 2: Manual Copy
+#### Method 2: Manual Copy
 
 1. Copy the entire `Move_SR_Bridge/` folder to:
    ```
@@ -101,10 +127,46 @@ There are two ways to install Move-SR-Bridge.
 4. Set the Input and Output ports to your Move's MIDI Live Port.
 5. Make sure your screen reader is running.
 
+### macOS
+
+#### Method 1: Shell Installer (Recommended)
+
+1. Open Terminal.
+2. Navigate to the project directory.
+3. Run:
+   ```
+   scripts/install_mac.sh
+   ```
+4. Follow the prompts to select which Live installation(s) to target.
+
+#### Method 2: Manual Copy
+
+1. Copy the entire `Move_SR_Bridge/` folder to your Live installation's
+   MIDI Remote Scripts directory:
+   ```
+   /Applications/Ableton Live 12 Suite.app/Contents/App-Resources/MIDI Remote Scripts/
+   ```
+2. Make the helper binary executable:
+   ```
+   chmod +x .../Move_SR_Bridge/sr_helper_mac
+   ```
+3. Open Ableton Live, go to **Settings > Link/Tempo/MIDI**, and select
+   **Move_SR_Bridge** as the Control Surface.
+
+#### VoiceOver Setup (Required)
+
+1. Enable VoiceOver: **Cmd+F5**
+2. Open VoiceOver Utility: **VO+F8** (VO = Ctrl+Option, or Caps Lock)
+3. Go to **General**
+4. Check **"Allow VoiceOver to be controlled with AppleScript"**
+5. Close VoiceOver Utility
+
 ## Running From Source
 
-If you prefer not to use the compiled `sr_helper.exe`, you can run the
-helper from source using system Python:
+If you prefer not to use the compiled helper, you can run it from source
+using system Python:
+
+### Windows
 
 1. Install from source (omits the .exe):
    ```
@@ -116,38 +178,46 @@ helper from source using system Python:
    scripts\start_helper.bat
    ```
    This opens a console window running `sr_helper.py` via system Python.
-   The console shows status messages useful for debugging.
 
-3. Open Live and configure Move_SR_Bridge as usual. The remote script
-   auto-detects the running helper via TCP and will not try to launch
-   its own `sr_helper.exe`.
+### macOS
 
-4. When Live unloads the script, it will **not** shut down a
-   manually-started helper. Close the console window yourself, or
-   press Ctrl+C.
+1. Before opening Live, start the helper manually:
+   ```
+   scripts/start_helper_mac.sh
+   ```
+   Or directly:
+   ```
+   python3 Move_SR_Bridge/sr_helper.py
+   ```
+
+In both cases, the remote script auto-detects the running helper via TCP
+and will not try to launch its own. When Live unloads the script, it will
+**not** shut down a manually-started helper -- close it yourself or press
+Ctrl+C.
 
 ## Uninstallation
 
-To remove Move-SR-Bridge from Ableton Live:
+### Windows
 
 1. Open a Command Prompt (you may need **Run as Administrator**).
-2. Navigate to the project directory.
-3. Run:
+2. Run:
    ```
    scripts\uninstall.bat
    ```
-4. If multiple Live installations are detected (e.g., Suite and Beta),
-   you will be prompted to select which one to uninstall from, or
-   choose **A** to uninstall from all of them.
-5. Confirm removal for each selected installation.
+3. Select the installation(s) to remove, or choose **A** for all.
 
-The uninstaller will automatically terminate any running `sr_helper.exe`
-process before removing files. You can also pass a selection on the
-command line to skip the interactive prompt (e.g., `scripts\uninstall.bat A`).
+### macOS
+
+1. Open Terminal.
+2. Run:
+   ```
+   scripts/uninstall_mac.sh
+   ```
+3. Select the installation(s) to remove.
 
 ## Building From Source
 
-To compile `sr_helper.exe` from `sr_helper.py`:
+To compile the helper binary from `sr_helper.py`:
 
 1. Install PyInstaller:
    ```
@@ -155,13 +225,11 @@ To compile `sr_helper.exe` from `sr_helper.py`:
    ```
 
 2. From the project root, run:
-   ```
-   python scripts\build.py
-   ```
+   - **Windows:** `python scripts\build.py`
+   - **macOS:** `python scripts/build_mac.py`
 
-3. The script will ask for confirmation, then build the helper
-   (`--onefile --noconsole`) and copy the resulting `.exe` into
-   `Move_SR_Bridge/`.
+3. The script builds the helper (`--onefile`) and copies the resulting
+   binary into `Move_SR_Bridge/`.
 
 ## What Gets Announced
 
@@ -173,26 +241,26 @@ To compile `sr_helper.exe` from `sr_helper.py`:
 | Script load                   | "Move connected"                     |
 | Script unload / Live close   | "Move disconnected"                  |
 
-Both speech and braille output are supported (braille availability
-depends on the active screen reader).
+Both speech and braille output are supported on Windows (braille
+availability depends on the active screen reader). On macOS, speech is
+routed through VoiceOver, which handles braille output automatically.
 
 ## How It Works
 
-Ableton Live's embedded Python lacks `ctypes`, so the Tolk DLL cannot
-be called directly from within the MIDI Remote Script. Move-SR-Bridge
+Ableton Live's embedded Python lacks `ctypes`, so screen reader DLLs
+cannot be called directly from within the MIDI Remote Script. Move-SR-Bridge
 solves this with a two-process architecture:
 
 ```
-Ableton Live (embedded Python)             sr_helper.exe
-+--------------------------------------+  +---------------------------+
-| Move_SR_Bridge/__init__.py           |  | Loads Tolk.dll via ctypes |
-|   Wraps Display.display()            |  |   Tolk auto-detects the  |
-|   Extracts text from content    TCP  |  |   active screen reader   |
-|   Sends JSON to localhost:8765 ----->|  |   (NVDA, JAWS, etc.)     |
-| Move_SR_Bridge/sr_bridge.py         |  |                           |
-|   Socket client                      |  | Tolk.dll                  |
-+--------------------------------------+  |   nvdaControllerClient64  |
-                                          +----.dll-------------------+
+Ableton Live (embedded Python)             sr_helper (system Python / compiled)
++--------------------------------------+  +-----------------------------------+
+| Move_SR_Bridge/__init__.py           |  | Windows: loads Tolk.dll via       |
+|   Wraps Display.display()            |  |   ctypes, speaks via NVDA/JAWS/  |
+|   Extracts text from content    TCP  |  |   etc.                           |
+|   Sends JSON to localhost:8765 ----->|  | macOS: speaks via VoiceOver      |
+| Move_SR_Bridge/sr_bridge.py         |  |   AppleScript (osascript)        |
+|   Socket client                      |  +-----------------------------------+
++--------------------------------------+
 ```
 
 1. The script subclasses the stock `Move` control surface and
@@ -202,19 +270,18 @@ Ableton Live (embedded Python)             sr_helper.exe
    extracts the text lines and sends them as JSON over a TCP socket to
    `127.0.0.1:8765`.
 
-3. `sr_helper.exe` receives the commands and forwards them to the active
-   screen reader via Tolk.
+3. The helper receives the commands and forwards them to the active
+   screen reader.
 
 4. The original display method is always called -- the OLED keeps working.
 
 ### Helper Auto-Detection
 
 When the remote script loads, it probes TCP port 8765 before launching
-`sr_helper.exe`. If a helper is already listening (started manually or
-from a previous session), the script connects to it without spawning a
-new process. When the script unloads, it only sends a quit command to
-the helper if it launched it -- a manually-started helper is left
-running.
+the helper. If a helper is already listening (started manually or from
+a previous session), the script connects to it without spawning a new
+process. When the script unloads, it only sends a quit command to the
+helper if it launched it -- a manually-started helper is left running.
 
 ### Content Types
 
@@ -236,14 +303,14 @@ differently for speech:
 Live scans scripts on startup. If the script has an import error, it
 will be silently skipped. Check Live's log file:
 
-```
-C:\Users\<you>\AppData\Roaming\Ableton\Live 12.x.x\Preferences\Log.txt
-```
+- **Windows:** `C:\Users\<you>\AppData\Roaming\Ableton\Live 12.x.x\Preferences\Log.txt`
+- **macOS:** `~/Library/Preferences/Ableton/Live 12.x.x/Log.txt`
 
 Search for `Move_SR_Bridge` to see any errors.
 
 ### No speech output
 
+**Windows:**
 1. Make sure your screen reader is running (check the system tray).
 2. Check the helper log file at `Move_SR_Bridge\Move_SR_Bridge.log`
    (in the MIDI Remote Scripts directory) for errors. Look for the
@@ -252,16 +319,25 @@ Search for `Move_SR_Bridge` to see any errors.
 4. Try running the helper manually with `scripts\start_helper.bat` to
    see console output.
 
+**macOS:**
+1. Make sure VoiceOver is enabled (Cmd+F5).
+2. Verify VoiceOver AppleScript is enabled: open VoiceOver Utility
+   (VO+F8), go to General, check "Allow VoiceOver to be controlled
+   with AppleScript".
+3. Check the helper log file at `Move_SR_Bridge/Move_SR_Bridge.log`.
+4. Try running the helper manually with `scripts/start_helper_mac.sh`
+   to see terminal output.
+
 ### Manual helper launch (debugging)
 
+**Windows:**
 ```
 scripts\start_helper.bat
 ```
 
-Or directly:
+**macOS:**
 ```
-cd "C:\ProgramData\Ableton\Live 12 Suite\Resources\MIDI Remote Scripts\Move_SR_Bridge"
-python sr_helper.py
+scripts/start_helper_mac.sh
 ```
 
 ## AI Assistance & Security
@@ -274,12 +350,12 @@ warranty is provided -- see the GPLv3 license for details.
 
 ## Third-Party Components
 
-- **Tolk.dll** -- Tolk screen reader abstraction library by Davy Kager.
+- **Tolk.dll** (Windows) -- Tolk screen reader abstraction library by Davy Kager.
   Licensed under the
   [GNU Lesser General Public License v3](https://www.gnu.org/licenses/lgpl-3.0.html).
   Redistributed unmodified.
 
-- **nvdaControllerClient64.dll** -- NVDA Controller Client library.
+- **nvdaControllerClient64.dll** (Windows) -- NVDA Controller Client library.
   Copyright NV Access Limited. Licensed under the
   [GNU Lesser General Public License v2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html).
   Redistributed unmodified. Used by Tolk as a companion DLL for NVDA

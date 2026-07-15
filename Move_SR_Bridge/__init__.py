@@ -17,13 +17,14 @@
 Move-SR-Bridge -- Drop-in replacement for the stock Ableton Move MIDI
 Remote Script that adds screen reader output (speech + braille).
 
-Supports NVDA, JAWS, Window-Eyes, ZoomText, and System Access via the
-Tolk abstraction library.
+Platform backends:
+    Windows: NVDA, JAWS, Window-Eyes, ZoomText, System Access via Tolk
+    macOS:   VoiceOver via AppleScript (Tahoe 26 or later)
 
 When Live renders content for the Move's 128x64 OLED display, this script
 intercepts the text and sends it via TCP to a companion helper process
-(sr_helper.exe) which forwards it to the active screen reader.  The OLED
-keeps working normally.
+(sr_helper.exe on Windows, sr_helper_mac on macOS) which forwards it to
+the active screen reader.  The OLED keeps working normally.
 
 The helper process is launched automatically when this script loads and
 stopped when it unloads.
@@ -32,6 +33,8 @@ stopped when it unloads.
 import logging
 import os
 import subprocess
+import sys
+import threading
 
 logger = logging.getLogger(__name__)
 logger.info("Move_SR_Bridge: Script loading...")
@@ -60,13 +63,30 @@ for _name, _import in [
     try:
         _mod = __import__("Move.display_util", fromlist=[_import])
         _content_types[_name] = getattr(_mod, _import)
-    except (ImportError, AttributeError):
-        pass
+    except ImportError:
+        logger.debug(
+            "Move_SR_Bridge: Could not import Move.display_util"
+        )
+    except AttributeError:
+        logger.debug(
+            "Move_SR_Bridge: Move.display_util has no %s", _import
+        )
 
 logger.info(
-    "Move_SR_Bridge: Content types available: %s",
-    list(_content_types.keys()) if _content_types else "none (generic fallback)",
+    "Move_SR_Bridge: Content types available: vertical=%s, "
+    "horizontal=%s, notification=%s, content=%s",
+    "vertical" in _content_types,
+    "horizontal" in _content_types,
+    "notification" in _content_types,
+    "content" in _content_types,
 )
+
+# --------------------------------------------------------------------------
+# Load user configuration (~/.move_sr_bridge/config.ini)
+# --------------------------------------------------------------------------
+from . import config as _config_mod
+
+_cfg = _config_mod.load_config()
 
 # --------------------------------------------------------------------------
 # Helper process management
@@ -94,10 +114,14 @@ def _helper_is_running():
 
 
 def _start_helper():
-    """Launch sr_helper.exe as a hidden background process.
+    """Launch the screen reader helper as a background process.
+
+    Detects the platform and launches the appropriate helper:
+        Windows: sr_helper.exe (hidden window)
+        macOS:   sr_helper_mac
 
     If a helper is already listening on port 8765 (e.g. started manually
-    via start_helper.bat), we skip launching and set _we_launched_helper
+    via start_helper.bat/.sh), we skip launching and set _we_launched_helper
     to False so we don't kill it on disconnect.
     """
     global _helper_proc, _we_launched_helper
@@ -111,23 +135,36 @@ def _start_helper():
         _we_launched_helper = False
         return
 
-    exe_path = os.path.join(_SCRIPT_DIR, "sr_helper.exe")
+    if sys.platform == "darwin":
+        exe_path = os.path.join(_SCRIPT_DIR, "sr_helper_mac")
+        helper_name = "sr_helper_mac"
+    else:
+        exe_path = os.path.join(_SCRIPT_DIR, "sr_helper.exe")
+        helper_name = "sr_helper.exe"
+
     if not os.path.exists(exe_path):
         logger.warning(
-            "Move_SR_Bridge: sr_helper.exe not found at %s -- "
+            "Move_SR_Bridge: %s not found at %s -- "
             "speech will not work unless the helper is started manually",
+            helper_name,
             exe_path,
         )
         _we_launched_helper = False
         return
 
     try:
-        CREATE_NO_WINDOW = 0x08000000
-        _helper_proc = subprocess.Popen(
-            [exe_path],
-            cwd=_SCRIPT_DIR,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        if sys.platform == "darwin":
+            _helper_proc = subprocess.Popen(
+                [exe_path],
+                cwd=_SCRIPT_DIR,
+            )
+        else:
+            CREATE_NO_WINDOW = 0x08000000
+            _helper_proc = subprocess.Popen(
+                [exe_path],
+                cwd=_SCRIPT_DIR,
+                creationflags=CREATE_NO_WINDOW,
+            )
         _we_launched_helper = True
         logger.info(
             "Move_SR_Bridge: Helper process started (PID %d)",
@@ -168,12 +205,12 @@ def _stop_helper():
     if _helper_proc is not None:
         # Give it a moment, then terminate if still alive
         try:
-            _helper_proc.wait(timeout=2)
+            _helper_proc.wait(timeout=1)
             logger.info("Move_SR_Bridge: Helper process exited cleanly")
         except subprocess.TimeoutExpired:
             try:
                 _helper_proc.terminate()
-                _helper_proc.wait(timeout=2)
+                _helper_proc.wait(timeout=1)
                 logger.info("Move_SR_Bridge: Helper process terminated")
             except Exception as e:
                 logger.warning(
@@ -239,22 +276,53 @@ def _install_display_hook(control_surface):
         )
         return False
 
-    original_display_method = display.display
+    original_display_method = getattr(display, "display", None)
+    if not callable(original_display_method):
+        logger.warning(
+            "Move_SR_Bridge: display.display is not callable, cannot install hook"
+        )
+        return False
+
     last_announced = [None]
+    debounce_enabled = _cfg.getboolean("debounce", "enabled")
+    debounce_delay = _cfg.getint("debounce", "delay_ms") / 1000.0
+    _debounce_timer = [None]
+    _pending_text = [None]
+
+    def _do_announce():
+        """Called by debounce timer when it fires."""
+        text = _pending_text[0]
+        if text is not None:
+            _pending_text[0] = None
+            sr_bridge.speak(text)
+            sr_bridge.braille(text)
 
     def _intercepted_display(content):
         try:
             text = _format_content(content)
             if text and text != last_announced[0]:
                 last_announced[0] = text
-                sr_bridge.speak(text)
-                sr_bridge.braille(text)
+                if debounce_enabled and debounce_delay > 0:
+                    if _debounce_timer[0] is not None:
+                        _debounce_timer[0].cancel()
+                    _pending_text[0] = text
+                    t = threading.Timer(debounce_delay, _do_announce)
+                    t.daemon = True
+                    t.start()
+                    _debounce_timer[0] = t
+                else:
+                    sr_bridge.speak(text)
+                    sr_bridge.braille(text)
         except Exception as e:
             logger.debug("Move_SR_Bridge: Display hook error: %s", e)
         original_display_method(content)
 
     display.display = _intercepted_display
-    logger.info("Move_SR_Bridge: Display hook installed")
+    logger.info(
+        "Move_SR_Bridge: Display hook installed (debounce=%s, delay=%dms)",
+        debounce_enabled,
+        int(debounce_delay * 1000),
+    )
 
     sr_bridge.speak("Move connected")
     sr_bridge.braille("Move connected")
@@ -296,8 +364,8 @@ class Move(_OriginalMove):
             except Exception:
                 pass
         logger.info("Move_SR_Bridge: Script unloading")
-        _stop_helper()
         super().disconnect()
+        _stop_helper()
 
 
 # --------------------------------------------------------------------------

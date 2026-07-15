@@ -166,4 +166,7 @@ echo   3. Select "Move_SR_Bridge" as the Control Surface
 echo   4. Set Input/Output to your Move's MIDI Live Port
 echo   5. Make sure your screen reader is running
 echo.
+echo   Config file: %USERPROFILE%\.move_sr_bridge\config.ini
+echo     (created automatically on first launch, edit to customise debounce)
+echo.
 pause

@@ -25,6 +25,7 @@ Protocol: newline-delimited JSON over TCP to 127.0.0.1:8765
 import json
 import logging
 import socket
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,8 @@ def speak(text):
 
 def braille(text):
     """Display text on braille display via the active screen reader."""
+    if sys.platform == "darwin":
+        return
     _send({"cmd": "braille", "text": str(text)})
 
 

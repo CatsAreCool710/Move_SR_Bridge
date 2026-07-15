@@ -17,13 +17,15 @@
 SR Helper -- TCP server that bridges Ableton Live to screen readers.
 
 Part of the Move-SR-Bridge project.  Runs as a standalone process
-(compiled to .exe or via system Python).  Listens on TCP port 8765 for
-JSON commands from the Move_SR_Bridge MIDI Remote Script running inside
-Ableton Live, and forwards them to the active screen reader via the
-Tolk abstraction library.
+(compiled to .exe/.binary or via system Python).  Listens on TCP port
+8765 for JSON commands from the Move_SR_Bridge MIDI Remote Script
+running inside Ableton Live, and forwards them to the active screen
+reader.
 
-Supported screen readers (via Tolk):
-    NVDA, JAWS, Window-Eyes, ZoomText, System Access
+Platform backends:
+    Windows: Tolk abstraction library (NVDA, JAWS, Window-Eyes, ZoomText,
+             System Access)
+    macOS:   VoiceOver via AppleScript (macOS Tahoe 26 or later)
 
 Protocol: newline-delimited JSON over TCP on 127.0.0.1:8765
     {"cmd": "speak", "text": "..."}
@@ -32,10 +34,10 @@ Protocol: newline-delimited JSON over TCP on 127.0.0.1:8765
     {"cmd": "quit"}
 """
 
-import ctypes
 import json
 import logging
 import os
+import platform
 import socket
 import sys
 import threading
@@ -59,7 +61,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("sr_helper")
 
-# Also log to console if we have one (manual launch via .bat)
+# Also log to console if we have one (manual launch via .bat/.sh)
 if sys.stderr and hasattr(sys.stderr, "write"):
     try:
         _console = logging.StreamHandler(sys.stderr)
@@ -74,101 +76,225 @@ if sys.stderr and hasattr(sys.stderr, "write"):
 # ---------------------------------------------------------------------------
 _shutdown = threading.Event()
 
-# ---------------------------------------------------------------------------
-# Tolk screen reader abstraction library
-# ---------------------------------------------------------------------------
-_tolk = None
 
+# ===================================================================
+#  Platform-specific screen reader backend
+# ===================================================================
 
-def load_tolk():
-    """Load and initialize the Tolk screen reader library."""
-    global _tolk
-    dll_path = os.path.join(_script_dir, "Tolk.dll")
+if sys.platform == "darwin":
+    # ------------------------------------------------------------------
+    #  macOS: VoiceOver via AppleScript (osascript)
+    # ------------------------------------------------------------------
+    import subprocess
 
-    if not os.path.exists(dll_path):
-        log.error("Tolk.dll not found: %s", dll_path)
-        return False
-    try:
-        _tolk = ctypes.cdll.LoadLibrary(dll_path)
+    _vo_proc = None
 
-        # Set up function signatures for proper wide-string marshaling
-        _tolk.Tolk_DetectScreenReader.restype = ctypes.c_wchar_p
-        _tolk.Tolk_IsLoaded.restype = ctypes.c_bool
-        _tolk.Tolk_HasSpeech.restype = ctypes.c_bool
-        _tolk.Tolk_HasBraille.restype = ctypes.c_bool
+    def _escape_applescript(text):
+        """Escape text for safe embedding in AppleScript double-quoted strings."""
+        return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
-        _tolk.Tolk_Speak.restype = ctypes.c_bool
-        _tolk.Tolk_Speak.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+    def _run_osascript(script):
+        """Run an AppleScript snippet via osascript.  Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                if stderr:
+                    log.debug("osascript stderr: %s", stderr)
+                return False
+            return True
+        except FileNotFoundError:
+            log.error("osascript not found -- is this really macOS?")
+            return False
+        except subprocess.TimeoutExpired:
+            log.warning("osascript timed out")
+            return False
+        except Exception as e:
+            log.warning("osascript error: %s", e)
+            return False
 
-        _tolk.Tolk_Braille.restype = ctypes.c_bool
-        _tolk.Tolk_Braille.argtypes = [ctypes.c_wchar_p]
+    def _fire_osascript(script):
+        """Fire AppleScript asynchronously.  Non-blocking."""
+        global _vo_proc
+        if _vo_proc is not None and _vo_proc.poll() is None:
+            try:
+                _vo_proc.kill()
+                _vo_proc.wait(timeout=1)
+            except Exception:
+                pass
+        try:
+            _vo_proc = subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            return True
+        except Exception as e:
+            log.warning("osascript error: %s", e)
+            return False
 
-        _tolk.Tolk_Output.restype = ctypes.c_bool
-        _tolk.Tolk_Output.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+    def _voiceover_running():
+        """Check whether the VoiceOver process is running."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", "VoiceOver"],
+                capture_output=True, timeout=3,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
-        _tolk.Tolk_Silence.restype = ctypes.c_bool
+    def load_backend():
+        """Initialise the macOS VoiceOver backend."""
+        mac_ver = platform.mac_ver()[0]
+        log.info("Detected macOS %s (%s)", mac_ver or "?", platform.machine())
 
-        # Initialize Tolk (this also calls CoInitializeEx internally)
-        _tolk.Tolk_Load()
+        if not _voiceover_running():
+            log.warning(
+                "VoiceOver is not running -- speech will not work until "
+                "VoiceOver is enabled (Cmd+F5)"
+            )
+            return True  # still allow the server to start
 
-        sr = _tolk.Tolk_DetectScreenReader()
-        if sr:
-            log.info("Tolk loaded -- detected screen reader: %s", sr)
-            log.info(
-                "  Speech: %s, Braille: %s",
-                _tolk.Tolk_HasSpeech(),
-                _tolk.Tolk_HasBraille(),
+        # Probe whether AppleScript control is enabled
+        if not _run_osascript('tell application "VoiceOver" to output ""'):
+            log.warning(
+                "VoiceOver AppleScript control is not enabled.  "
+                "Open VoiceOver Utility (VO+F8), go to General, and "
+                'check "Allow VoiceOver to be controlled with AppleScript".'
             )
         else:
-            log.warning(
-                "Tolk loaded but no screen reader detected -- "
-                "will retry when commands arrive"
-            )
+            log.info("VoiceOver AppleScript control is enabled")
         return True
-    except OSError as e:
-        log.error("Failed to load Tolk.dll: %s", e)
-        _tolk = None
-        return False
 
+    def unload_backend():
+        """Kill any lingering osascript process."""
+        global _vo_proc
+        if _vo_proc is not None and _vo_proc.poll() is None:
+            try:
+                _vo_proc.kill()
+                _vo_proc.wait(timeout=1)
+            except Exception:
+                pass
+        _vo_proc = None
 
-def unload_tolk():
-    """Unload the Tolk library (releases COM, etc.)."""
-    if _tolk is not None:
+    def sr_speak(text):
+        """Speak text via VoiceOver AppleScript."""
+        escaped = _escape_applescript(text)
+        if not _fire_osascript(
+            'tell application "VoiceOver" to output "' + escaped + '"'
+        ):
+            log.warning("VoiceOver speak failed for: %s", text)
+
+    def sr_braille(text):
+        """Braille is handled automatically by VoiceOver when it speaks."""
+        pass
+
+    def sr_cancel():
+        """Silence VoiceOver."""
+        _fire_osascript('tell application "VoiceOver" to output ""')
+
+else:
+    # ------------------------------------------------------------------
+    #  Windows: Tolk screen reader abstraction library
+    # ------------------------------------------------------------------
+    import ctypes
+
+    _tolk = None
+
+    def load_backend():
+        """Load and initialise the Tolk screen reader library."""
+        global _tolk
+        dll_path = os.path.join(_script_dir, "Tolk.dll")
+
+        if not os.path.exists(dll_path):
+            log.error("Tolk.dll not found: %s", dll_path)
+            return False
         try:
-            _tolk.Tolk_Unload()
-            log.info("Tolk unloaded")
-        except Exception:
-            pass
+            _tolk = ctypes.cdll.LoadLibrary(dll_path)
+
+            # Set up function signatures for proper wide-string marshaling
+            _tolk.Tolk_DetectScreenReader.restype = ctypes.c_wchar_p
+            _tolk.Tolk_IsLoaded.restype = ctypes.c_bool
+            _tolk.Tolk_HasSpeech.restype = ctypes.c_bool
+            _tolk.Tolk_HasBraille.restype = ctypes.c_bool
+
+            _tolk.Tolk_Speak.restype = ctypes.c_bool
+            _tolk.Tolk_Speak.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+
+            _tolk.Tolk_Braille.restype = ctypes.c_bool
+            _tolk.Tolk_Braille.argtypes = [ctypes.c_wchar_p]
+
+            _tolk.Tolk_Output.restype = ctypes.c_bool
+            _tolk.Tolk_Output.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+
+            _tolk.Tolk_Silence.restype = ctypes.c_bool
+
+            # Initialize Tolk (this also calls CoInitializeEx internally)
+            _tolk.Tolk_Load()
+
+            sr = _tolk.Tolk_DetectScreenReader()
+            if sr:
+                log.info("Tolk loaded -- detected screen reader: %s", sr)
+                log.info(
+                    "  Speech: %s, Braille: %s",
+                    _tolk.Tolk_HasSpeech(),
+                    _tolk.Tolk_HasBraille(),
+                )
+            else:
+                log.warning(
+                    "Tolk loaded but no screen reader detected -- "
+                    "will retry when commands arrive"
+                )
+            return True
+        except OSError as e:
+            log.error("Failed to load Tolk.dll: %s", e)
+            _tolk = None
+            return False
+
+    def unload_backend():
+        """Unload the Tolk library (releases COM, etc.)."""
+        if _tolk is not None:
+            try:
+                _tolk.Tolk_Unload()
+                log.info("Tolk unloaded")
+            except Exception:
+                pass
+
+    def sr_speak(text):
+        """Speak text via the active screen reader."""
+        if _tolk is None:
+            return
+        try:
+            _tolk.Tolk_Speak(str(text), True)  # interrupt=True
+        except Exception as e:
+            log.warning("speak error: %s", e)
+
+    def sr_braille(text):
+        """Display text on braille display via the active screen reader."""
+        if _tolk is None:
+            return
+        try:
+            _tolk.Tolk_Braille(str(text))
+        except Exception as e:
+            log.warning("braille error: %s", e)
+
+    def sr_cancel():
+        """Silence the active screen reader."""
+        if _tolk is None:
+            return
+        try:
+            _tolk.Tolk_Silence()
+        except Exception as e:
+            log.warning("cancel error: %s", e)
 
 
-def sr_speak(text):
-    """Speak text via the active screen reader."""
-    if _tolk is None:
-        return
-    try:
-        _tolk.Tolk_Speak(str(text), True)  # interrupt=True
-    except Exception as e:
-        log.warning("speak error: %s", e)
-
-
-def sr_braille(text):
-    """Display text on braille display via the active screen reader."""
-    if _tolk is None:
-        return
-    try:
-        _tolk.Tolk_Braille(str(text))
-    except Exception as e:
-        log.warning("braille error: %s", e)
-
-
-def sr_cancel():
-    """Silence the active screen reader."""
-    if _tolk is None:
-        return
-    try:
-        _tolk.Tolk_Silence()
-    except Exception as e:
-        log.warning("cancel error: %s", e)
+# ===================================================================
+#  Shared: command dispatch, TCP server, main
+# ===================================================================
 
 
 # ---------------------------------------------------------------------------
@@ -236,15 +362,11 @@ def main():
     log.info("Move-SR-Bridge Helper starting")
     log.info("Log file: %s", _log_path)
 
-    if not load_tolk():
-        log.error("Cannot continue without Tolk")
+    if not load_backend():
+        log.error("Cannot continue without screen reader backend")
         sys.exit(1)
 
-    sr = _tolk.Tolk_DetectScreenReader() if _tolk else None
-    if sr:
-        sr_speak("Move SR Bridge helper started")
-    else:
-        log.warning("No screen reader detected -- will retry when commands arrive")
+    sr_speak("Move SR Bridge helper started")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -272,7 +394,7 @@ def main():
         log.info("Keyboard interrupt, shutting down")
     finally:
         server.close()
-        unload_tolk()
+        unload_backend()
         log.info("Move-SR-Bridge Helper stopped")
 
 

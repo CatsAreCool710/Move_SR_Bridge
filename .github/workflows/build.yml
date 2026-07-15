@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -48,5 +48,50 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: Move-SR-Bridge.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    runs-on: macos-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build sr_helper_mac
+        run: python scripts/build_mac.py --yes
+        env:
+          PYINSTALLER_QUIET: 1
+
+      - name: Build graphical installer
+        run: osacompile -l JavaScript -o "Install Move-SR-Bridge.app" "scripts/installer/mac/Install Move-SR-Bridge.js"
+
+      - name: Create distribution zip
+        run: |
+          staging="${{ github.workspace }}/staging"
+          mkdir -p "$staging"
+
+          cp -R Move_SR_Bridge "$staging/"
+          cp -R scripts "$staging/"
+          cp -R "Install Move-SR-Bridge.app" "$staging/"
+          cp README.md LICENSE "$staging/"
+
+          ditto -c -k --sequesterRsrc --keepParent "$staging" Move-SR-Bridge-macOS.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: Move-SR-Bridge-macOS.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
