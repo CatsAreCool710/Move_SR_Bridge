@@ -111,43 +111,70 @@ function doInstall(app, fm, packageSrc, packageName) {
         return;
     }
 
-    // Install to each selected Live
+    // Install to each selected Live -- each installation is independent, so
+    // a failure on one shouldn't abort the rest of the batch.
     var installed = [];
+    var failed = [];
     for (var i = 0; i < selected.length; i++) {
         var live = liveApps[selected[i]];
         var dest = live.scriptsDir + "/" + packageName;
+        try {
+            if (fm.fileExistsAtPath(dest)) {
+                doShell(app, "rm -rf " + shQuote(dest));
+            }
+            doShell(app, "cp -R " + shQuote(packageSrc) + " " + shQuote(dest));
 
-        // Remove old installation
-        if (fm.fileExistsAtPath(dest)) {
-            doShell(app, "rm -rf '" + dest + "'");
+            var helperPath = dest + "/sr_helper_mac";
+            if (fm.fileExistsAtPath(helperPath)) {
+                doShell(app, "chmod +x " + shQuote(helperPath));
+            }
+            installed.push(live.name);
+        } catch (e) {
+            failed.push(live.name);
         }
+    }
 
-        // Copy package
-        doShell(app, "cp -R '" + packageSrc + "' '" + dest + "'");
-
-        // Make helper executable
-        var helperPath = dest + "/sr_helper_mac";
-        if (fm.fileExistsAtPath(helperPath)) {
-            doShell(app, "chmod +x '" + helperPath + "'");
+    if (installed.length === 0) {
+        var failMsg = "Move-SR-Bridge could not be installed to any selected installation:\n\n";
+        for (var i = 0; i < failed.length; i++) {
+            failMsg += "  " + failed[i] + "\n";
         }
-
-        installed.push(live.name);
+        app.displayDialog(failMsg, {
+            withTitle: "Move-SR-Bridge Installer",
+            buttons: ["OK"],
+            defaultButton: 1,
+        });
+        return;
     }
 
     // Create config if it doesn't exist
-    ensureConfig(app, fm);
+    var configOk = ensureConfig(app, fm);
 
-    // Success
-    var msg = "Move-SR-Bridge installed successfully!\n\n";
-    if (installed.length > 1) {
-        msg += "Installed to:\n";
-        for (var i = 0; i < installed.length; i++) {
-            msg += "  " + installed[i] + "\n";
+    // Success (or partial success)
+    var msg =
+        failed.length === 0
+            ? "Move-SR-Bridge installed successfully!\n\n"
+            : "Move-SR-Bridge installed with some errors.\n\n";
+
+    msg += "Installed to:\n";
+    for (var i = 0; i < installed.length; i++) {
+        msg += "  " + installed[i] + "\n";
+    }
+    msg += "\n";
+
+    if (failed.length > 0) {
+        msg += "Failed for:\n";
+        for (var i = 0; i < failed.length; i++) {
+            msg += "  " + failed[i] + "\n";
         }
         msg += "\n";
-    } else {
-        msg += "Installed to: " + installed[0] + "\n\n";
     }
+
+    if (!configOk) {
+        msg += "Warning: could not create the default config file at\n" +
+            "~/.move_sr_bridge/config.ini -- defaults will be used.\n\n";
+    }
+
     msg +=
         "To use:\n" +
         "  1. Open Ableton Live\n" +
@@ -250,44 +277,68 @@ function doUninstall(app, fm, packageName) {
         return;
     }
 
-    // Stop helper processes
+    // Stop helper processes (harmless no-op if none running -- "|| true"
+    // keeps the exit code 0 so this never throws)
     doShell(app, "pkill -x sr_helper_mac 2>/dev/null || true");
 
-    // Remove from each selected installation
+    // Remove from each selected installation -- independent per-installation,
+    // so a failure on one shouldn't abort the rest of the batch.
     var removed = [];
+    var failed = [];
     for (var i = 0; i < selected.length; i++) {
         var live = installedApps[selected[i]];
         var dest = live.scriptsDir + "/" + packageName;
         if (fm.fileExistsAtPath(dest)) {
-            doShell(app, "rm -rf '" + dest + "'");
-            removed.push(live.name);
+            try {
+                doShell(app, "rm -rf " + shQuote(dest));
+                removed.push(live.name);
+            } catch (e) {
+                failed.push(live.name);
+            }
         }
     }
 
-    // Ask about config file
+    // Ask about config file. "Keep Config" is also the cancel button, so
+    // Escape/Return-on-default and clicking "Keep Config" all take the same
+    // safe no-delete path via the catch block below.
     var configDir =
         ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge";
     if (fm.fileExistsAtPath(configDir)) {
         try {
-            app.displayDialog(
+            var configChoice = app.displayDialog(
                 "Also remove the config file?\n" + configDir,
                 {
                     withTitle: "Move-SR-Bridge Uninstaller",
                     buttons: ["Remove Config", "Keep Config"],
                     defaultButton: 2,
+                    cancelButton: 2,
                 }
             );
-            doShell(app, "rm -rf '" + configDir + "'");
+            if (configChoice.buttonReturned === "Remove Config") {
+                doShell(app, "rm -rf " + shQuote(configDir));
+            }
         } catch (e) {
-            // Keep config
+            // Keep config (cancelled / "Keep Config" clicked)
         }
     }
 
-    // Success
-    var msg = "Move-SR-Bridge uninstalled successfully!\n\n";
-    msg += "Removed from:\n";
-    for (var i = 0; i < removed.length; i++) {
-        msg += "  " + removed[i] + "\n";
+    // Success (or partial success)
+    var msg =
+        failed.length === 0
+            ? "Move-SR-Bridge uninstalled successfully!\n\n"
+            : "Move-SR-Bridge uninstalled with some errors.\n\n";
+
+    if (removed.length > 0) {
+        msg += "Removed from:\n";
+        for (var i = 0; i < removed.length; i++) {
+            msg += "  " + removed[i] + "\n";
+        }
+    }
+    if (failed.length > 0) {
+        msg += "\nFailed to remove from:\n";
+        for (var i = 0; i < failed.length; i++) {
+            msg += "  " + failed[i] + "\n";
+        }
     }
 
     app.displayDialog(msg, {
@@ -302,7 +353,7 @@ function doUninstall(app, fm, packageName) {
 // ---------------------------------------------------------------------------
 function isLiveRunning(app) {
     try {
-        var result = doShell(app, "pgrep -x Ableton 2>/dev/null || true");
+        var result = doShell(app, "pgrep -x Live 2>/dev/null || true");
         if (result.trim() !== "") {
             app.displayDialog(
                 "Ableton Live is currently running.\n\n" +
@@ -340,7 +391,7 @@ function detectLiveApps() {
                 "/Contents/App-Resources/MIDI Remote Scripts";
             if (fm.fileExistsAtPath(scriptsDir)) {
                 liveApps.push({
-                    name: name.replace(".app", ""),
+                    name: name.replace(/\.app$/, ""),
                     path: appPath,
                     scriptsDir: scriptsDir,
                 });
@@ -382,13 +433,20 @@ function selectInstallations(app, liveApps, action) {
         return []; // Cancelled
     }
 
+    if (chosen === false) {
+        return []; // Cancelled -- chooseFromList returns false, it doesn't throw
+    }
+
+    // Match each chosen label to exactly one liveApps entry (consume the
+    // label once it's matched) so duplicate display names can't cause a
+    // single selection to map to more than one underlying installation.
     var selected = [];
+    var remaining = chosen.slice();
     for (var i = 0; i < liveApps.length; i++) {
-        for (var j = 0; j < chosen.length; j++) {
-            if (liveApps[i].name === chosen[j]) {
-                selected.push(i);
-                break;
-            }
+        var idx = remaining.indexOf(liveApps[i].name);
+        if (idx !== -1) {
+            selected.push(i);
+            remaining.splice(idx, 1);
         }
     }
     return selected;
@@ -400,11 +458,15 @@ function ensureConfig(app, fm) {
     var configFile = configDir + "/config.ini";
 
     if (fm.fileExistsAtPath(configFile)) {
-        return;
+        return true;
     }
 
     // Create directory
-    doShell(app, "mkdir -p '" + configDir + "'");
+    try {
+        doShell(app, "mkdir -p " + shQuote(configDir));
+    } catch (e) {
+        return false;
+    }
 
     // Write default config
     var defaultConfig =
@@ -420,12 +482,18 @@ function ensureConfig(app, fm) {
         "delay_ms = 300\n";
 
     var nsStr = $.NSString.stringWithString(defaultConfig);
-    nsStr.writeToFileAtomicallyEncodingError(
+    var ok = nsStr.writeToFileAtomicallyEncodingError(
         configFile,
         true,
         $.NSUTF8StringEncoding,
         null
     );
+    return Boolean(ok);
+}
+
+// Escape a string for safe embedding as a single-quoted POSIX shell argument.
+function shQuote(str) {
+    return "'" + String(str).replace(/'/g, "'\\''") + "'";
 }
 
 function doShell(app, command) {

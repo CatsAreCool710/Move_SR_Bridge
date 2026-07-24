@@ -35,9 +35,11 @@ jobs:
         run: |
           $staging = "${{ github.workspace }}/staging"
           New-Item -ItemType Directory -Force -Path $staging
+          New-Item -ItemType Directory -Force -Path "$staging/Move_SR_Bridge"
+          New-Item -ItemType Directory -Force -Path "$staging/scripts"
 
-          Copy-Item -Recurse -Force "${{ github.workspace }}/Move_SR_Bridge" "$staging/"
-          Copy-Item -Recurse -Force "${{ github.workspace }}/scripts" "$staging/"
+          Copy-Item "${{ github.workspace }}/Move_SR_Bridge/__init__.py","${{ github.workspace }}/Move_SR_Bridge/config.py","${{ github.workspace }}/Move_SR_Bridge/sr_bridge.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.exe","${{ github.workspace }}/Move_SR_Bridge/Tolk.dll","${{ github.workspace }}/Move_SR_Bridge/nvdaControllerClient64.dll" "$staging/Move_SR_Bridge/"
+          Copy-Item "${{ github.workspace }}/scripts/install.bat","${{ github.workspace }}/scripts/install_from_source.bat","${{ github.workspace }}/scripts/uninstall.bat","${{ github.workspace }}/scripts/start_helper.bat","${{ github.workspace }}/scripts/build.py" "$staging/scripts/"
           Copy-Item "${{ github.workspace }}/README.md" "$staging/"
           Copy-Item "${{ github.workspace }}/LICENSE" "$staging/"
 
@@ -81,8 +83,18 @@ jobs:
           staging="${{ github.workspace }}/staging"
           mkdir -p "$staging"
 
-          cp -R Move_SR_Bridge "$staging/"
-          cp -R scripts "$staging/"
+          mkdir -p "$staging/Move_SR_Bridge"
+          cp Move_SR_Bridge/__init__.py Move_SR_Bridge/config.py Move_SR_Bridge/sr_bridge.py \
+             Move_SR_Bridge/sr_helper.py Move_SR_Bridge/sr_helper_mac \
+             "$staging/Move_SR_Bridge/"
+
+          mkdir -p "$staging/scripts/installer/mac"
+          cp scripts/install_mac.sh scripts/uninstall_mac.sh scripts/start_helper_mac.sh \
+             scripts/build_mac.py scripts/release_mac.sh \
+             "$staging/scripts/"
+          cp scripts/installer/mac/build.sh "scripts/installer/mac/Install Move-SR-Bridge.js" \
+             "$staging/scripts/installer/mac/"
+
           cp -R "Install Move-SR-Bridge.app" "$staging/"
           cp README.md LICENSE "$staging/"
 

@@ -62,7 +62,10 @@ def _send(msg):
     try:
         data = json.dumps(msg) + "\n"
         _sock.sendall(data.encode("utf-8"))
-    except OSError:
+    except OSError as e:
+        logger.debug(
+            "Move_SR_Bridge: Send failed, dropping connection: %s", e
+        )
         try:
             _sock.close()
         except Exception:

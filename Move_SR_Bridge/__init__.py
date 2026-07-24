@@ -35,8 +35,26 @@ import os
 import subprocess
 import sys
 import threading
+import time
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    try:
+        _log_handler = logging.FileHandler(
+            os.path.join(_SCRIPT_DIR, "Move_SR_Bridge.log"),
+            mode="a",
+            encoding="utf-8",
+        )
+        _log_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        logger.addHandler(_log_handler)
+        logger.setLevel(logging.DEBUG)
+    except OSError:
+        pass
+
 logger.info("Move_SR_Bridge: Script loading...")
 
 # --------------------------------------------------------------------------
@@ -93,7 +111,6 @@ _cfg = _config_mod.load_config()
 # --------------------------------------------------------------------------
 _helper_proc = None
 _we_launched_helper = False
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _HELPER_HOST = "127.0.0.1"
 _HELPER_PORT = 8765
@@ -170,6 +187,36 @@ def _start_helper():
             "Move_SR_Bridge: Helper process started (PID %d)",
             _helper_proc.pid,
         )
+
+        # Verify it actually stayed alive and started listening before
+        # declaring success -- Popen() succeeding only means the OS could
+        # launch it, not that it didn't crash immediately afterward.
+        listening = False
+        for _ in range(10):  # poll for up to ~1s
+            if _helper_proc.poll() is not None:
+                break
+            if _helper_is_running():
+                listening = True
+                break
+            time.sleep(0.1)
+
+        if _helper_proc.poll() is not None:
+            logger.error(
+                "Move_SR_Bridge: Helper process exited immediately "
+                "(exit code %s) -- speech will not work; check "
+                "Move_SR_Bridge.log next to the helper for details",
+                _helper_proc.poll(),
+            )
+            _helper_proc = None
+            _we_launched_helper = False
+        elif not listening:
+            logger.warning(
+                "Move_SR_Bridge: Helper process (PID %d) did not start "
+                "listening on port %d within 1s -- speech may be delayed "
+                "or unavailable",
+                _helper_proc.pid,
+                _HELPER_PORT,
+            )
     except Exception as e:
         logger.error("Move_SR_Bridge: Failed to start helper: %s", e)
         _helper_proc = None
@@ -221,6 +268,17 @@ def _stop_helper():
 
     _helper_proc = None
     _we_launched_helper = False
+
+    # Positively confirm the helper's listening socket is actually closed
+    # (not just that the process handle exited) before returning. A
+    # subsequent _start_helper() call uses _helper_is_running() as its
+    # source of truth for whether a new helper needs to be spawned, and
+    # sr_helper.py's accept loop can take up to ~1s after shutdown to
+    # actually close its listening socket.
+    for _ in range(10):  # poll for up to ~1s
+        if not _helper_is_running():
+            break
+        time.sleep(0.1)
 
 
 # --------------------------------------------------------------------------
@@ -284,16 +342,32 @@ def _install_display_hook(control_surface):
         return False
 
     last_announced = [None]
-    debounce_enabled = _cfg.getboolean("debounce", "enabled")
-    debounce_delay = _cfg.getint("debounce", "delay_ms") / 1000.0
+    try:
+        debounce_enabled = _cfg.getboolean("debounce", "enabled")
+    except ValueError:
+        logger.warning(
+            "Move_SR_Bridge: Invalid 'enabled' value in config.ini, "
+            "using default (true)"
+        )
+        debounce_enabled = True
+    try:
+        debounce_delay = _cfg.getint("debounce", "delay_ms") / 1000.0
+    except ValueError:
+        logger.warning(
+            "Move_SR_Bridge: Invalid 'delay_ms' value in config.ini, "
+            "using default (300)"
+        )
+        debounce_delay = 0.3
     _debounce_timer = [None]
     _pending_text = [None]
+    _debounce_lock = threading.Lock()
 
     def _do_announce():
         """Called by debounce timer when it fires."""
-        text = _pending_text[0]
-        if text is not None:
+        with _debounce_lock:
+            text = _pending_text[0]
             _pending_text[0] = None
+        if text is not None:
             sr_bridge.speak(text)
             sr_bridge.braille(text)
 
@@ -303,13 +377,14 @@ def _install_display_hook(control_surface):
             if text and text != last_announced[0]:
                 last_announced[0] = text
                 if debounce_enabled and debounce_delay > 0:
-                    if _debounce_timer[0] is not None:
-                        _debounce_timer[0].cancel()
-                    _pending_text[0] = text
-                    t = threading.Timer(debounce_delay, _do_announce)
-                    t.daemon = True
-                    t.start()
-                    _debounce_timer[0] = t
+                    with _debounce_lock:
+                        if _debounce_timer[0] is not None:
+                            _debounce_timer[0].cancel()
+                        _pending_text[0] = text
+                        t = threading.Timer(debounce_delay, _do_announce)
+                        t.daemon = True
+                        t.start()
+                        _debounce_timer[0] = t
                 else:
                     sr_bridge.speak(text)
                     sr_bridge.braille(text)

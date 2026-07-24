@@ -79,5 +79,14 @@ def load_config():
     config = configparser.ConfigParser()
     config.read_dict(_DEFAULTS)
     if os.path.isfile(_CONFIG_FILE):
-        config.read(_CONFIG_FILE, encoding="utf-8")
+        try:
+            config.read(_CONFIG_FILE, encoding="utf-8")
+        except configparser.Error as e:
+            logger.warning(
+                "Move_SR_Bridge: Malformed config file %s, using defaults: %s",
+                _CONFIG_FILE,
+                e,
+            )
+            config = configparser.ConfigParser()
+            config.read_dict(_DEFAULTS)
     return config

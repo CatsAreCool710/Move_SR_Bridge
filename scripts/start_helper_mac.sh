@@ -54,7 +54,7 @@ done
 
 # De-duplicate
 UNIQUE=()
-for c in "${CANDIDATES[@]}"; do
+for c in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
     dup=0
     for u in "${UNIQUE[@]+"${UNIQUE[@]}"}"; do
         if [ "$c" = "$u" ]; then dup=1; break; fi

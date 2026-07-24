@@ -76,6 +76,16 @@ if sys.stderr and hasattr(sys.stderr, "write"):
 # ---------------------------------------------------------------------------
 _shutdown = threading.Event()
 
+# Guards the platform backend's shared mutable state (_vo_proc on macOS,
+# concurrent Tolk DLL calls on Windows) against concurrent client-handler
+# threads.
+_backend_lock = threading.Lock()
+
+# Maximum bytes to buffer per connection while waiting for a newline before
+# giving up on that line (protects against unbounded memory growth from a
+# client that never sends "\n").
+_MAX_LINE_BYTES = 65536
+
 
 # ===================================================================
 #  Platform-specific screen reader backend
@@ -119,22 +129,23 @@ if sys.platform == "darwin":
     def _fire_osascript(script):
         """Fire AppleScript asynchronously.  Non-blocking."""
         global _vo_proc
-        if _vo_proc is not None and _vo_proc.poll() is None:
+        with _backend_lock:
+            if _vo_proc is not None and _vo_proc.poll() is None:
+                try:
+                    _vo_proc.kill()
+                    _vo_proc.wait(timeout=1)
+                except Exception:
+                    pass
             try:
-                _vo_proc.kill()
-                _vo_proc.wait(timeout=1)
-            except Exception:
-                pass
-        try:
-            _vo_proc = subprocess.Popen(
-                ["osascript", "-e", script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            return True
-        except Exception as e:
-            log.warning("osascript error: %s", e)
-            return False
+                _vo_proc = subprocess.Popen(
+                    ["osascript", "-e", script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except Exception as e:
+                log.warning("osascript error: %s", e)
+                return False
 
     def _voiceover_running():
         """Check whether the VoiceOver process is running."""
@@ -173,13 +184,14 @@ if sys.platform == "darwin":
     def unload_backend():
         """Kill any lingering osascript process."""
         global _vo_proc
-        if _vo_proc is not None and _vo_proc.poll() is None:
-            try:
-                _vo_proc.kill()
-                _vo_proc.wait(timeout=1)
-            except Exception:
-                pass
-        _vo_proc = None
+        with _backend_lock:
+            if _vo_proc is not None and _vo_proc.poll() is None:
+                try:
+                    _vo_proc.kill()
+                    _vo_proc.wait(timeout=1)
+                except Exception:
+                    pass
+            _vo_proc = None
 
     def sr_speak(text):
         """Speak text via VoiceOver AppleScript."""
@@ -269,7 +281,8 @@ else:
         if _tolk is None:
             return
         try:
-            _tolk.Tolk_Speak(str(text), True)  # interrupt=True
+            with _backend_lock:
+                _tolk.Tolk_Speak(str(text), True)  # interrupt=True
         except Exception as e:
             log.warning("speak error: %s", e)
 
@@ -278,7 +291,8 @@ else:
         if _tolk is None:
             return
         try:
-            _tolk.Tolk_Braille(str(text))
+            with _backend_lock:
+                _tolk.Tolk_Braille(str(text))
         except Exception as e:
             log.warning("braille error: %s", e)
 
@@ -287,7 +301,8 @@ else:
         if _tolk is None:
             return
         try:
-            _tolk.Tolk_Silence()
+            with _backend_lock:
+                _tolk.Tolk_Silence()
         except Exception as e:
             log.warning("cancel error: %s", e)
 
@@ -330,6 +345,16 @@ def handle_client(conn, addr):
                 break
             buffer += data.decode("utf-8", errors="replace")
 
+            if "\n" not in buffer and len(buffer) > _MAX_LINE_BYTES:
+                log.warning(
+                    "Line from %s exceeded %d bytes with no newline, "
+                    "dropping buffer",
+                    addr,
+                    _MAX_LINE_BYTES,
+                )
+                buffer = ""
+                continue
+
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 line = line.strip()
@@ -337,6 +362,9 @@ def handle_client(conn, addr):
                     continue
                 try:
                     msg = json.loads(line)
+                    if not isinstance(msg, dict):
+                        log.warning("Bad message (not a JSON object): %s", line)
+                        continue
                     cmd = msg.get("cmd", "")
                     handler = COMMANDS.get(cmd)
                     if handler:

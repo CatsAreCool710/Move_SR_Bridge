@@ -125,6 +125,16 @@ echo.
 echo Installing...
 echo.
 
+REM --- Kill running sr_helper.exe if found (avoid a locked destination) ---
+tasklist /FI "IMAGENAME eq sr_helper.exe" 2>nul | find /I "sr_helper.exe" >nul
+if !ERRORLEVEL!==0 (
+    echo Detected running sr_helper.exe process.
+    echo Terminating sr_helper.exe...
+    taskkill /F /IM sr_helper.exe >nul 2>&1
+    echo sr_helper.exe terminated.
+    echo.
+)
+
 REM --- Copy files to each target ---
 set "FAIL=0"
 for /l %%I in (!FIRST!,1,!LAST!) do (
@@ -135,9 +145,13 @@ for /l %%I in (!FIRST!,1,!LAST!) do (
     if exist "!DEST!" (
         echo Removing old installation...
         rmdir /s /q "!DEST!"
+        if !ERRORLEVEL! neq 0 (
+            echo ERROR: Failed to remove old installation for !NAME_%%I!. Try running as Administrator.
+            set "FAIL=1"
+        )
     )
 
-    xcopy "%SOURCE%" "!DEST!\" /E /I /Q /Y
+    xcopy "%SOURCE%" "!DEST!\\" /E /I /Q /Y
 
     if !ERRORLEVEL! neq 0 (
         echo ERROR: Copy failed for !NAME_%%I!. Try running as Administrator.

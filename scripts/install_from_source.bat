@@ -131,28 +131,48 @@ echo.
 echo Installing...
 echo.
 
+REM --- Kill running sr_helper.exe if found (avoid a locked destination) ---
+tasklist /FI "IMAGENAME eq sr_helper.exe" 2>nul | find /I "sr_helper.exe" >nul
+if !ERRORLEVEL!==0 (
+    echo Detected running sr_helper.exe process.
+    echo Terminating sr_helper.exe...
+    taskkill /F /IM sr_helper.exe >nul 2>&1
+    echo sr_helper.exe terminated.
+    echo.
+)
+
 REM --- Copy files to each target (excluding .exe) ---
 set "FAIL=0"
 for /l %%I in (!FIRST!,1,!LAST!) do (
     set "DEST=!SCRIPTS_%%I!\Move_SR_Bridge"
+    set "ITEM_FAIL=0"
     echo.
     echo --- Installing to !NAME_%%I! ---
 
     if exist "!DEST!" (
         echo Removing old installation...
         rmdir /s /q "!DEST!"
+        if !ERRORLEVEL! neq 0 (
+            echo ERROR: Failed to remove old installation for !NAME_%%I!. Try running as Administrator.
+            set "ITEM_FAIL=1"
+        )
     )
 
     mkdir "!DEST!"
 
     copy "%SOURCE%\__init__.py" "!DEST!\" >nul
+    if !ERRORLEVEL! neq 0 set "ITEM_FAIL=1"
     copy "%SOURCE%\sr_bridge.py" "!DEST!\" >nul
+    if !ERRORLEVEL! neq 0 set "ITEM_FAIL=1"
     copy "%SOURCE%\sr_helper.py" "!DEST!\" >nul
+    if !ERRORLEVEL! neq 0 set "ITEM_FAIL=1"
     copy "%SOURCE%\Tolk.dll" "!DEST!\" >nul
+    if !ERRORLEVEL! neq 0 set "ITEM_FAIL=1"
     copy "%SOURCE%\nvdaControllerClient64.dll" "!DEST!\" >nul
+    if !ERRORLEVEL! neq 0 set "ITEM_FAIL=1"
 
-    if !ERRORLEVEL! neq 0 (
-        echo ERROR: Copy failed for !NAME_%%I!. Try running as Administrator.
+    if "!ITEM_FAIL!"=="1" (
+        echo ERROR: One or more files failed to copy for !NAME_%%I!. Try running as Administrator.
         set "FAIL=1"
     ) else (
         echo Installed to !NAME_%%I! successfully.

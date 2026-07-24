@@ -37,7 +37,7 @@ if [ ${#LIVE_APPS[@]} -eq 0 ]; then
     echo "ERROR: No Ableton Live installations found in /Applications."
     echo ""
     echo "If Live is installed elsewhere, copy the ${PACKAGE_NAME}/ folder"
-    "to your Live MIDI Remote Scripts directory manually."
+    echo "to your Live MIDI Remote Scripts directory manually."
     exit 1
 fi
 
