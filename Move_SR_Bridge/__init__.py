@@ -58,6 +58,17 @@ if not logger.handlers:
 logger.info("Move_SR_Bridge: Script loading...")
 
 # --------------------------------------------------------------------------
+# Load user configuration (~/.move_sr_bridge/config.ini)
+# --------------------------------------------------------------------------
+from . import config as _config_mod
+
+_cfg = _config_mod.load_config()
+
+_log_level_name = _cfg.get("logging", "level", fallback="INFO").strip().upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
+logger.setLevel(_log_level)
+
+# --------------------------------------------------------------------------
 # Re-export get_capabilities from the original Move package so Live can
 # identify the hardware (vendor/product IDs, MIDI ports).
 # --------------------------------------------------------------------------
@@ -98,13 +109,6 @@ logger.info(
     "notification" in _content_types,
     "content" in _content_types,
 )
-
-# --------------------------------------------------------------------------
-# Load user configuration (~/.move_sr_bridge/config.ini)
-# --------------------------------------------------------------------------
-from . import config as _config_mod
-
-_cfg = _config_mod.load_config()
 
 # --------------------------------------------------------------------------
 # Helper process management
@@ -410,6 +414,65 @@ def _install_display_hook(control_surface):
 class Move(_OriginalMove):
     _sr_hook_installed = False
 
+    # Live-side focus/selection listeners: (owner attribute on song(), or
+    # None for song() itself; LOM property; handler method name).  These
+    # log Live's own focus/selection state at DEBUG, independent of the
+    # display hook, to help diagnose double-speech against Live's native
+    # VoiceOver narration (which follows Live's UI focus, not the Move's
+    # OLED).
+    _LIVE_LISTENERS = (
+        ("view", "selected_track", "_on_selected_track_changed"),
+        ("view", "selected_scene", "_on_selected_scene_changed"),
+        (None, "tracks", "_on_track_list_changed"),
+        (None, "scenes", "_on_scene_list_changed"),
+    )
+
+    def _on_selected_track_changed(self):
+        track = self.song().view.selected_track
+        name = track.name if track else "(none)"
+        logger.debug("Move_SR_Bridge: Live selected track changed -> %s", name)
+
+    def _on_selected_scene_changed(self):
+        scene = self.song().view.selected_scene
+        name = scene.name if scene else "(none)"
+        logger.debug("Move_SR_Bridge: Live selected scene changed -> %s", name)
+
+    def _on_track_list_changed(self):
+        logger.debug(
+            "Move_SR_Bridge: Live track list changed (now %d tracks)",
+            len(self.song().tracks),
+        )
+
+    def _on_scene_list_changed(self):
+        logger.debug(
+            "Move_SR_Bridge: Live scene list changed (now %d scenes)",
+            len(self.song().scenes),
+        )
+
+    def _install_live_listeners(self):
+        song = self.song()
+        for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
+            owner = getattr(song, owner_attr) if owner_attr else song
+            handler = getattr(self, handler_name)
+            try:
+                if not getattr(owner, "%s_has_listener" % prop)(handler):
+                    getattr(owner, "add_%s_listener" % prop)(handler)
+            except Exception as e:
+                logger.error(
+                    "Move_SR_Bridge: Failed to install %s listener: %s", prop, e
+                )
+
+    def _remove_live_listeners(self):
+        song = self.song()
+        for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
+            owner = getattr(song, owner_attr) if owner_attr else song
+            handler = getattr(self, handler_name)
+            try:
+                if getattr(owner, "%s_has_listener" % prop)(handler):
+                    getattr(owner, "remove_%s_listener" % prop)(handler)
+            except Exception:
+                pass
+
     def _try_install_hook(self):
         if self._sr_hook_installed:
             return
@@ -428,8 +491,10 @@ class Move(_OriginalMove):
             "Move_SR_Bridge: Move identified, installing display hook..."
         )
         self._try_install_hook()
+        self._install_live_listeners()
 
     def disconnect(self):
+        self._remove_live_listeners()
         if self._sr_hook_installed:
             try:
                 from . import sr_bridge

@@ -54,8 +54,21 @@ PORT = 8765
 _script_dir = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv[0] else __file__))
 _log_path = os.path.join(_script_dir, "Move_SR_Bridge.log")
 
+# Read the shared ~/.move_sr_bridge/config.ini for the configured log
+# level -- best-effort, since this process must start even if config.py
+# can't be found/imported (e.g. an unexpected PyInstaller bundling gap).
+sys.path.insert(0, _script_dir)
+try:
+    import config as _config_mod
+
+    _cfg = _config_mod.load_config()
+    _log_level_name = _cfg.get("logging", "level", fallback="INFO").strip().upper()
+    _log_level = getattr(logging, _log_level_name, logging.INFO)
+except Exception:
+    _log_level = logging.INFO
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=_log_level,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler(_log_path, mode="w", encoding="utf-8")],
 )
@@ -315,13 +328,19 @@ else:
 # ---------------------------------------------------------------------------
 # Command dispatch
 # ---------------------------------------------------------------------------
+def _handle_speak(msg):
+    text = msg.get("text", "")
+    log.debug("Speaking: %s", text)
+    sr_speak(text)
+
+
 def _handle_quit(_msg):
     log.info("Received quit command, shutting down")
     _shutdown.set()
 
 
 COMMANDS = {
-    "speak": lambda msg: sr_speak(msg.get("text", "")),
+    "speak": _handle_speak,
     "braille": lambda msg: sr_braille(msg.get("text", "")),
     "cancel": lambda _: sr_cancel(),
     "quit": _handle_quit,

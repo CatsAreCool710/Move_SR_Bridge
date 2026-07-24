@@ -23,6 +23,8 @@ Sections:
     [debounce]  -- Display-update debounce / flood control
         enabled   = true|false   (default: true)
         delay_ms  = <int>        (default: 300)
+    [logging]   -- Logging verbosity for Move_SR_Bridge.log
+        level     = DEBUG|INFO|WARNING|ERROR   (default: INFO)
 """
 
 import configparser
@@ -45,12 +47,23 @@ enabled = true
 # Lower values feel more responsive; higher values reduce chatter.
 # Set to 0 to effectively disable debounce even if enabled = true.
 delay_ms = 300
+
+[logging]
+# Logging verbosity written to Move_SR_Bridge.log.  Diagnostic-only
+# messages (every text sent to be spoken, and Live-side track/scene
+# selection changes) are logged at DEBUG and hidden by default.  Set
+# to DEBUG when diagnosing double-speech or other issues.
+# Valid values: DEBUG, INFO, WARNING, ERROR
+level = INFO
 """
 
 _DEFAULTS = {
     "debounce": {
         "enabled": "true",
         "delay_ms": "300",
+    },
+    "logging": {
+        "level": "INFO",
     },
 }
 

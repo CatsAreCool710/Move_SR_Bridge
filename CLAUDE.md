@@ -33,10 +33,14 @@ User-editable settings live in `~/.move_sr_bridge/config.ini` (auto-created on f
 [debounce]
 enabled = true      # Debounce display updates before speaking
 delay_ms = 300      # Ms to wait after last update before speaking
+
+[logging]
+level = INFO        # DEBUG, INFO, WARNING, or ERROR
 ```
 
 - `enabled`: When true, speech is delayed until no display updates occur for `delay_ms` milliseconds. Prevents rapid-fire speech during encoder turns.
 - `delay_ms`: Lower values feel more responsive; higher values reduce chatter. Set to 0 to effectively disable.
+- `level`: Verbosity written to `Move_SR_Bridge.log`, read by both the remote script and `sr_helper.py` from the same file. Diagnostic-only messages (every text sent to be spoken; Live-side track/scene selection changes) log at DEBUG and are hidden at the default INFO level. Set to DEBUG when diagnosing double-speech (see Diagnostics below).
 
 ## File Layout
 
@@ -68,6 +72,15 @@ scripts/
                                   the package + LICENSE inside
                                   Contents/Resources/ (requires
                                   sr_helper_mac already built)
+
+tools/
+  speech_history_logger.py  macOS-only debug tool (opt-in, manual): polls
+                             VoiceOver's "content of the last phrase" via
+                             AppleScript to log every utterance VoiceOver
+                             speaks -- including Live's own native
+                             announcements, which Move_SR_Bridge cannot
+                             see. Not installed to Live, not started by
+                             sr_helper.py, not gated by config.ini.
 ```
 
 ## Build & Deploy
@@ -102,12 +115,31 @@ Newline-delimited JSON over TCP to `127.0.0.1:8765`:
 {"cmd": "quit"}
 ```
 
+## Diagnostics
+
+Ableton Live has its own native VoiceOver narration (e.g. on track/scene
+selection change) that is completely independent of Move_SR_Bridge's OLED
+interception, and can overlap/double up with it. To diagnose this:
+
+1. Set `level = DEBUG` in `~/.move_sr_bridge/config.ini`. This surfaces
+   two new event streams in `Move_SR_Bridge.log`: `Speaking: ...` (every
+   text Move_SR_Bridge sent to be spoken) and `Live selected track/scene
+   changed -> ...` / `Live track/scene list changed` (Live's own
+   focus/selection state, independent of the display hook).
+2. On macOS, run `python3 tools/speech_history_logger.py` alongside the
+   helper. It produces `tools/speech_history.log` -- everything VoiceOver
+   actually spoke, whether triggered by Move_SR_Bridge or by Live itself.
+
+There is no automatic correlation or source tagging across these logs --
+compare timestamps by eye.
+
 ## Naming Conventions
 
 - Project name in prose/docs: **Move-SR-Bridge**
 - Python package/folder: **Move_SR_Bridge** (underscores)
 - Log prefix in all logger calls: `Move_SR_Bridge:`
 - Log file: `Move_SR_Bridge.log`
+- Debug tool log file: `tools/speech_history.log` (separate from `Move_SR_Bridge.log`, no shared code with `sr_helper.py`)
 - Helper files: `sr_helper.py`, `sr_helper.exe`, `sr_helper_mac`
 - Bridge module: `sr_bridge.py`
 
