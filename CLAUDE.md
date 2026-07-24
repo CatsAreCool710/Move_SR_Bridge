@@ -64,7 +64,10 @@ scripts/
   installer/
     mac/
       Install Move-SR-Bridge.js  JXA graphical installer (osacompile)
-      build.sh                   Builds the .app installer bundle
+      build.sh                   Builds the .app installer bundle; embeds
+                                  the package + LICENSE inside
+                                  Contents/Resources/ (requires
+                                  sr_helper_mac already built)
 ```
 
 ## Build & Deploy
@@ -77,11 +80,13 @@ scripts/
 - Live log: `C:\Users\<you>\AppData\Roaming\Ableton\Live 12.x.x\Preferences\Log.txt`
 
 ### macOS (Tahoe 26+)
-- Build binary: `python scripts/build_mac.py` (requires `pip install pyinstaller`)
-- Deploy to Live: `scripts/install_mac.sh` (detects Live installations in /Applications)
-- Deploy to Live (GUI): `scripts/installer/mac/build.sh` then double-click `Install Move-SR-Bridge.app`
-- Uninstall: `scripts/uninstall_mac.sh`
+- Build binary: `python scripts/build_mac.py` (requires `pip install pyinstaller`). Produces a single-arch binary matching the local machine.
+- Build the self-contained installer: `scripts/installer/mac/build.sh` (requires `sr_helper_mac` already built). Runs `osacompile`, then copies `Move_SR_Bridge/{__init__.py,config.py,sr_bridge.py,sr_helper.py,sr_helper_mac}` and `LICENSE` into `Install Move-SR-Bridge.app/Contents/Resources/` -- the `.app` needs no sibling folder and is the only file in the release zip.
+- Deploy to Live (GUI, recommended): double-click `Install Move-SR-Bridge.app` -- it has both Install and Uninstall built in.
+- Deploy to Live (shell, from source): `scripts/install_mac.sh` (detects Live installations in /Applications)
+- Uninstall (shell, from source): `scripts/uninstall_mac.sh`
 - Live MIDI Remote Scripts path: `/Applications/Ableton Live XX.app/Contents/App-Resources/MIDI Remote Scripts/`
+- Official releases (`.github/workflows/build.yml`) build `sr_helper_mac` as a universal2 (arm64 + x86_64) binary: install a universal2 python.org interpreter, build once under `arch -arm64` and once under `arch -x86_64`, then `lipo -create` the two into one fat binary before running `build.sh`.
 - VoiceOver setup: Enable "Allow VoiceOver to be controlled with AppleScript" in VoiceOver Utility > General
 
 - Helper log: `Move_SR_Bridge.log` (written next to the helper at runtime)

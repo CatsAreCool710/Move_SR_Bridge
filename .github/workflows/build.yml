@@ -43,13 +43,13 @@ jobs:
           Copy-Item "${{ github.workspace }}/README.md" "$staging/"
           Copy-Item "${{ github.workspace }}/LICENSE" "$staging/"
 
-          Compress-Archive -Path "$staging/*" -DestinationPath "${{ github.workspace }}/Move-SR-Bridge.zip"
+          Compress-Archive -Path "$staging/*" -DestinationPath "${{ github.workspace }}/Move-SR-Bridge-Windows.zip"
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: Move-SR-Bridge.zip
+          files: Move-SR-Bridge-Windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -62,43 +62,39 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      - name: Build sr_helper_mac
-        run: python scripts/build_mac.py --yes
+      - name: Install universal2 Python
         env:
-          PYINSTALLER_QUIET: 1
+          PYTHON_VERSION: '3.13.14'
+        run: |
+          curl -fsSL -o /tmp/python.pkg "https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-macos11.pkg"
+          sudo installer -pkg /tmp/python.pkg -target /
+          PY="/Library/Frameworks/Python.framework/Versions/${PYTHON_VERSION%.*}/bin/python3"
+          "$PY" -m pip install --upgrade pip pyinstaller
+          echo "PY=$PY" >> "$GITHUB_ENV"
+
+      - name: Build sr_helper_mac (arm64)
+        run: |
+          arch -arm64 "$PY" scripts/build_mac.py --yes
+          mv Move_SR_Bridge/sr_helper_mac Move_SR_Bridge/sr_helper_mac_arm64
+
+      - name: Build sr_helper_mac (x86_64)
+        run: |
+          arch -x86_64 "$PY" scripts/build_mac.py --yes
+          mv Move_SR_Bridge/sr_helper_mac Move_SR_Bridge/sr_helper_mac_x86_64
+
+      - name: Merge into universal2 binary
+        run: |
+          lipo -create -output Move_SR_Bridge/sr_helper_mac \
+            Move_SR_Bridge/sr_helper_mac_arm64 Move_SR_Bridge/sr_helper_mac_x86_64
+          rm Move_SR_Bridge/sr_helper_mac_arm64 Move_SR_Bridge/sr_helper_mac_x86_64
+          chmod +x Move_SR_Bridge/sr_helper_mac
+          lipo -archs Move_SR_Bridge/sr_helper_mac
 
       - name: Build graphical installer
-        run: osacompile -l JavaScript -o "Install Move-SR-Bridge.app" "scripts/installer/mac/Install Move-SR-Bridge.js"
+        run: scripts/installer/mac/build.sh
 
       - name: Create distribution zip
-        run: |
-          staging="${{ github.workspace }}/staging"
-          mkdir -p "$staging"
-
-          mkdir -p "$staging/Move_SR_Bridge"
-          cp Move_SR_Bridge/__init__.py Move_SR_Bridge/config.py Move_SR_Bridge/sr_bridge.py \
-             Move_SR_Bridge/sr_helper.py Move_SR_Bridge/sr_helper_mac \
-             "$staging/Move_SR_Bridge/"
-
-          mkdir -p "$staging/scripts/installer/mac"
-          cp scripts/install_mac.sh scripts/uninstall_mac.sh scripts/start_helper_mac.sh \
-             scripts/build_mac.py scripts/release_mac.sh \
-             "$staging/scripts/"
-          cp scripts/installer/mac/build.sh "scripts/installer/mac/Install Move-SR-Bridge.js" \
-             "$staging/scripts/installer/mac/"
-
-          cp -R "Install Move-SR-Bridge.app" "$staging/"
-          cp README.md LICENSE "$staging/"
-
-          ditto -c -k --sequesterRsrc --keepParent "$staging" Move-SR-Bridge-macOS.zip
+        run: ditto -c -k --sequesterRsrc --keepParent "Install Move-SR-Bridge.app" Move-SR-Bridge-macOS.zip
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2

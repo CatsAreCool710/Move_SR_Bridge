@@ -35,7 +35,7 @@ Desktop.ini
 Move_SR_Bridge.log
 
 # GitHub Actions / release build output
-Move-SR-Bridge.zip
+Move-SR-Bridge-Windows.zip
 Move-SR-Bridge-macOS.zip
 
 # macOS installer app (built by osacompile)

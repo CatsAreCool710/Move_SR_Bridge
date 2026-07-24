@@ -5,7 +5,12 @@ connected to Ableton Live as a control surface.
 
 ## Downloads
 
-Pre-built releases are available on the [Releases page](https://github.com/CatsAreCool710/Move_SR_Bridge/releases).
+Pre-built releases are available on the [Releases page](https://github.com/CatsAreCool710/Move_SR_Bridge/releases):
+
+- **`Move-SR-Bridge-Windows.zip`** -- Windows release
+- **`Move-SR-Bridge-macOS.zip`** -- macOS release. Contains a single
+  self-contained `Install Move-SR-Bridge.app` -- everything it needs is
+  embedded inside the app bundle.
 
 ## Introduction
 
@@ -59,6 +64,12 @@ speech and braille output accordingly.
   with AppleScript" turned on in VoiceOver Utility > General
 
 ## Project Structure
+
+This tree describes the **repository**. The distributed releases differ:
+the Windows release zip mirrors this folder structure (`Move_SR_Bridge/` +
+`scripts/`), while the macOS release zip contains only the single
+self-contained `Install Move-SR-Bridge.app` (the package is embedded
+inside `Contents/Resources/`).
 
 ```
 Move-SR-Bridge/
@@ -129,17 +140,32 @@ Move-SR-Bridge/
 
 ### macOS
 
-#### Method 1: Shell Installer (Recommended)
+#### Method 1: Graphical Installer (Recommended)
+
+1. Download `Move-SR-Bridge-macOS.zip` from the
+   [Releases page](https://github.com/CatsAreCool710/Move_SR_Bridge/releases)
+   and extract it.
+2. Double-click **Install Move-SR-Bridge.app**.
+3. Choose **Install**, select which Live installation(s) to target, and
+   follow the prompts. The same app also handles uninstalling later --
+   just run it again and choose **Uninstall**.
+
+This app is self-contained (the package is embedded inside it), so it
+does not need to sit next to any other files.
+
+#### Method 2: Shell Installer (from source)
 
 1. Open Terminal.
-2. Navigate to the project directory.
+2. Navigate to the project directory (a clone of this repo, with
+   `Move_SR_Bridge/sr_helper_mac` already built -- see
+   [Building From Source](#building-from-source)).
 3. Run:
    ```
    scripts/install_mac.sh
    ```
 4. Follow the prompts to select which Live installation(s) to target.
 
-#### Method 2: Manual Copy
+#### Method 3: Manual Copy
 
 1. Copy the entire `Move_SR_Bridge/` folder to your Live installation's
    MIDI Remote Scripts directory:
@@ -208,6 +234,11 @@ Ctrl+C.
 
 ### macOS
 
+If you installed via **Install Move-SR-Bridge.app**, just run it again
+and choose **Uninstall**.
+
+If you installed from source:
+
 1. Open Terminal.
 2. Run:
    ```
@@ -230,6 +261,13 @@ To compile the helper binary from `sr_helper.py`:
 
 3. The script builds the helper (`--onefile`) and copies the resulting
    binary into `Move_SR_Bridge/`.
+
+On macOS, to also build the self-contained graphical installer
+(`Install Move-SR-Bridge.app`) after `sr_helper_mac` exists, run
+`scripts/installer/mac/build.sh`. It embeds the package and `LICENSE`
+inside the app bundle. Official releases build a universal2 (arm64 +
+x86_64) `sr_helper_mac` via CI; a local build produces a binary matching
+your own Mac's architecture only.
 
 ## What Gets Announced
 

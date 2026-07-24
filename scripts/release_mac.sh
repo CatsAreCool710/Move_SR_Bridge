@@ -5,8 +5,12 @@
 #
 # Builds:
 #   1. sr_helper_mac binary (PyInstaller)
-#   2. Install Move-SR-Bridge.app (JXA installer)
-#   3. Move-SR-Bridge-macOS.zip (distribution archive)
+#   2. Install Move-SR-Bridge.app (JXA installer, package + LICENSE embedded)
+#   3. Move-SR-Bridge-macOS.zip (distribution archive -- contains only the .app)
+#
+# Note: this produces a single-arch binary matching the machine it runs on.
+# Official releases are built by CI (.github/workflows/build.yml), which
+# builds a universal2 (arm64 + x86_64) binary via a dual-arch build + lipo.
 #
 # Usage:
 #   scripts/release_mac.sh              # Interactive
@@ -44,51 +48,24 @@ deactivate
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 2: Build installer .app
+# Step 2: Build installer .app (embeds the package + LICENSE inside it)
 # ---------------------------------------------------------------------------
-echo "Step 2: Building Install Move-SR-Bridge.app (osacompile)..."
+echo "Step 2: Building Install Move-SR-Bridge.app..."
 echo ""
 
-osacompile -l JavaScript -o "Install Move-SR-Bridge.app" \
-    "scripts/installer/mac/Install Move-SR-Bridge.js"
+scripts/installer/mac/build.sh
 
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 3: Create distribution zip
+# Step 3: Create distribution zip -- contains only the self-contained .app
 # ---------------------------------------------------------------------------
 echo "Step 3: Creating distribution zip..."
 echo ""
 
-STAGING="${PROJECT_DIR}/staging"
-rm -rf "$STAGING"
-mkdir -p "$STAGING"
-
-# Copy package (mac files only -- no Windows DLLs)
-mkdir -p "$STAGING/Move_SR_Bridge"
-cp Move_SR_Bridge/__init__.py Move_SR_Bridge/config.py Move_SR_Bridge/sr_bridge.py \
-   Move_SR_Bridge/sr_helper.py Move_SR_Bridge/sr_helper_mac \
-   "$STAGING/Move_SR_Bridge/"
-
-# Copy scripts (mac files only -- no Windows .bat/build.py)
-mkdir -p "$STAGING/scripts/installer/mac"
-cp scripts/install_mac.sh scripts/uninstall_mac.sh scripts/start_helper_mac.sh \
-   scripts/build_mac.py scripts/release_mac.sh \
-   "$STAGING/scripts/"
-cp scripts/installer/mac/build.sh "scripts/installer/mac/Install Move-SR-Bridge.js" \
-   "$STAGING/scripts/installer/mac/"
-
-# Copy installer .app
-cp -R "Install Move-SR-Bridge.app" "$STAGING/"
-
-# Copy docs
-cp README.md LICENSE "$STAGING/"
-
-# Create zip
 ZIP_NAME="Move-SR-Bridge-macOS.zip"
 rm -f "$ZIP_NAME"
-ditto -c -k --sequesterRsrc --keepParent "$STAGING" "$ZIP_NAME"
-rm -rf "$STAGING"
+ditto -c -k --sequesterRsrc --keepParent "Install Move-SR-Bridge.app" "$ZIP_NAME"
 
 ZIP_SIZE=$(ls -lh "$ZIP_NAME" | awk '{print $5}')
 
@@ -101,11 +78,7 @@ echo "  Release asset: ${PROJECT_DIR}/${ZIP_NAME}"
 echo "  Size:          ${ZIP_SIZE}"
 echo ""
 echo "Contents:"
-echo "  - Move_SR_Bridge/          (mac package: py sources + sr_helper_mac, no Windows DLLs)"
-echo "  - scripts/                 (mac install/build scripts only, no .bat files)"
-echo "  - Install Move-SR-Bridge.app  (graphical installer)"
-echo "  - README.md"
-echo "  - LICENSE"
+echo "  - Install Move-SR-Bridge.app  (self-contained: package + LICENSE embedded)"
 echo ""
 echo "Next steps:"
 echo "  1. Commit and push your changes"

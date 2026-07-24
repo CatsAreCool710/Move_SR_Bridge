@@ -11,21 +11,17 @@ function run(argv) {
 
     var PACKAGE_NAME = "Move_SR_Bridge";
 
-    // Find the project root (the .app is a sibling to Move_SR_Bridge/)
-    var bundlePath = ObjC.unwrap($.NSBundle.mainBundle.bundlePath);
-    var projectDir = ObjC.unwrap(
-        $.NSString.stringWithString(bundlePath)
-            .stringByDeletingLastPathComponent
-    );
-    var packageSrc = projectDir + "/" + PACKAGE_NAME;
+    // The package is embedded inside this app's own bundle -- self-contained,
+    // no sibling folder required.
+    var packageSrc = getResourcesDir() + "/" + PACKAGE_NAME;
 
-    // Verify source package exists
+    // Verify the embedded package exists
     var fm = $.NSFileManager.defaultManager;
     if (!fm.fileExistsAtPath(packageSrc)) {
         app.displayDialog(
-            "Could not find the Move_SR_Bridge package at:\n" +
-                packageSrc +
-                "\n\nMake sure this .app is in the same directory as the Move_SR_Bridge folder.",
+            "This installer appears to be incomplete: the Move_SR_Bridge " +
+                "package is missing from the app bundle.\n\n" +
+                "Please re-download the installer.",
             {
                 withTitle: "Move-SR-Bridge Installer",
                 buttons: ["OK"],
@@ -351,6 +347,11 @@ function doUninstall(app, fm, packageName) {
 // ---------------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------------
+function getResourcesDir() {
+    var bundleURL = $.NSBundle.mainBundle.bundleURL;
+    return ObjC.unwrap(bundleURL.path) + "/Contents/Resources";
+}
+
 function isLiveRunning(app) {
     try {
         var result = doShell(app, "pgrep -x Live 2>/dev/null || true");
