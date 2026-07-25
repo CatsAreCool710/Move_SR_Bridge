@@ -450,28 +450,42 @@ class Move(_OriginalMove):
         )
 
     def _install_live_listeners(self):
-        song = self.song()
-        for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
-            owner = getattr(song, owner_attr) if owner_attr else song
-            handler = getattr(self, handler_name)
-            try:
-                if not getattr(owner, "%s_has_listener" % prop)(handler):
-                    getattr(owner, "add_%s_listener" % prop)(handler)
-            except Exception as e:
-                logger.error(
-                    "Move_SR_Bridge: Failed to install %s listener: %s", prop, e
-                )
+        # Everything in here must be defensive: an uncaught exception
+        # would propagate out of on_identified() and can leave Live
+        # thinking hardware identification didn't complete cleanly,
+        # breaking normal display updates even though our own hook
+        # already installed successfully.
+        try:
+            song = self.song()
+            for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
+                try:
+                    owner = getattr(song, owner_attr) if owner_attr else song
+                    handler = getattr(self, handler_name)
+                    if not getattr(owner, "%s_has_listener" % prop)(handler):
+                        getattr(owner, "add_%s_listener" % prop)(handler)
+                except Exception as e:
+                    logger.error(
+                        "Move_SR_Bridge: Failed to install %s listener: %s", prop, e
+                    )
+        except Exception as e:
+            logger.error("Move_SR_Bridge: Failed to access song() for listeners: %s", e)
 
     def _remove_live_listeners(self):
-        song = self.song()
-        for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
-            owner = getattr(song, owner_attr) if owner_attr else song
-            handler = getattr(self, handler_name)
-            try:
-                if getattr(owner, "%s_has_listener" % prop)(handler):
-                    getattr(owner, "remove_%s_listener" % prop)(handler)
-            except Exception:
-                pass
+        # Same defensiveness as _install_live_listeners -- must never
+        # raise, since this runs first thing in disconnect() and would
+        # otherwise abort cleanup (super().disconnect(), _stop_helper()).
+        try:
+            song = self.song()
+            for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
+                try:
+                    owner = getattr(song, owner_attr) if owner_attr else song
+                    handler = getattr(self, handler_name)
+                    if getattr(owner, "%s_has_listener" % prop)(handler):
+                        getattr(owner, "remove_%s_listener" % prop)(handler)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _try_install_hook(self):
         if self._sr_hook_installed:
