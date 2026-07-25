@@ -70,7 +70,12 @@ except Exception:
 logging.basicConfig(
     level=_log_level,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(_log_path, mode="w", encoding="utf-8")],
+    # mode="a": __init__.py (running inside Live) writes to this same
+    # file in append mode and logs several lines before this process
+    # even starts.  Opening with mode="w" here would truncate those
+    # lines out from under it (and can tear an in-flight write if the
+    # timing overlaps).
+    handlers=[logging.FileHandler(_log_path, mode="a", encoding="utf-8")],
 )
 log = logging.getLogger("sr_helper")
 
