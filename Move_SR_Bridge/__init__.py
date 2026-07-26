@@ -288,22 +288,26 @@ def _stop_helper():
 # --------------------------------------------------------------------------
 # Display content formatting
 # --------------------------------------------------------------------------
-def _format_content(content, live_selected_names=None):
+def _format_content(content):
     """Extract human-readable text from a display content object.
 
-    live_selected_names, if given, is a set of names Live's own UI focus
-    is currently on (selected track/scene).  Ableton Live narrates its
-    own focus changes independently of this hook, so when the OLED's
-    "name: value" pair repeats a name Live just announced, only the new
-    information (value) is spoken to avoid saying the name twice.
+    Returns (text, name_part). text is the complete text used for
+    change-detection (so e.g. "1-MIDI: No Device" and "2-MIDI: No
+    Device" are never treated as the same announcement, even though
+    they may end up sounding identical once spoken -- see name_part).
+    name_part is the "name" half of a horizontal name/value pair (the
+    exact prefix "name: " in text) when this content is that shape, or
+    None otherwise -- used by the caller to strip a redundant name Live
+    itself is expected to have just announced, without disturbing
+    change-detection.
     """
     lines = getattr(content, "lines", None)
     if not lines:
-        return None
+        return None, None
 
     text_lines = [str(line).strip() for line in lines if line and str(line).strip()]
     if not text_lines:
-        return None
+        return None, None
 
     # Vertical list menus -- announce selected item
     if "vertical" in _content_types and isinstance(
@@ -311,26 +315,24 @@ def _format_content(content, live_selected_names=None):
     ):
         list_index = getattr(content, "list_index", None)
         if list_index is not None and 0 <= list_index < len(text_lines):
-            return text_lines[list_index]
-        return ", ".join(text_lines)
+            return text_lines[list_index], None
+        return ", ".join(text_lines), None
 
     # Horizontal list (name + value)
     if "horizontal" in _content_types and isinstance(
         content, _content_types["horizontal"]
     ):
         if len(text_lines) == 2:
-            if live_selected_names and text_lines[0] in live_selected_names:
-                return text_lines[1]
-            return text_lines[0] + ": " + text_lines[1]
-        return ", ".join(text_lines)
+            return text_lines[0] + ": " + text_lines[1], text_lines[0]
+        return ", ".join(text_lines), None
 
     # Notifications
     if "notification" in _content_types and isinstance(
         content, _content_types["notification"]
     ):
-        return " ".join(text_lines)
+        return " ".join(text_lines), None
 
-    return ", ".join(text_lines)
+    return ", ".join(text_lines), None
 
 
 def _get_live_selected_names(control_surface):
@@ -409,22 +411,26 @@ def _install_display_hook(control_surface):
 
     def _intercepted_display(content):
         try:
-            live_selected_names = _get_live_selected_names(control_surface)
-            text = _format_content(content, live_selected_names)
+            text, name_part = _format_content(content)
             if text and text != last_announced[0]:
                 last_announced[0] = text
+                spoken_text = text
+                if name_part:
+                    live_selected_names = _get_live_selected_names(control_surface)
+                    if name_part in live_selected_names:
+                        spoken_text = text[len(name_part) + 2:]  # strip "name: "
                 if debounce_enabled and debounce_delay > 0:
                     with _debounce_lock:
                         if _debounce_timer[0] is not None:
                             _debounce_timer[0].cancel()
-                        _pending_text[0] = text
+                        _pending_text[0] = spoken_text
                         t = threading.Timer(debounce_delay, _do_announce)
                         t.daemon = True
                         t.start()
                         _debounce_timer[0] = t
                 else:
-                    sr_bridge.speak(text)
-                    sr_bridge.braille(text)
+                    sr_bridge.speak(spoken_text)
+                    sr_bridge.braille(spoken_text)
         except Exception as e:
             logger.debug("Move_SR_Bridge: Display hook error: %s", e)
         original_display_method(content)
