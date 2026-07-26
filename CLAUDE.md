@@ -133,6 +133,20 @@ interception, and can overlap/double up with it. To diagnose this:
 There is no automatic correlation or source tagging across these logs --
 compare timestamps by eye.
 
+### Double-speech mitigation
+
+Confirmed via the above: Live's own native narration and Move_SR_Bridge's
+OLED-driven speech both announce the track/scene name on selection change,
+about `delay_ms` apart. To reduce this, `_format_content()` in
+`__init__.py` checks the OLED's "name: value" pairs (e.g. `"2-MIDI: No
+Device"`) against Live's currently selected track/scene name (read live
+via `_get_live_selected_names()`, not the diagnostic listeners above) and
+speaks only the value (`"No Device"`) when the name matches -- Live is
+expected to have just said the name itself. This is a heuristic, not a
+guarantee: it can't confirm Live's narration actually fired, and a
+device/parameter name that happens to match the current track/scene name
+would also get stripped.
+
 ## Naming Conventions
 
 - Project name in prose/docs: **Move-SR-Bridge**

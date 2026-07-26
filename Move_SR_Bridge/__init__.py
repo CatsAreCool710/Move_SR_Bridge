@@ -288,8 +288,15 @@ def _stop_helper():
 # --------------------------------------------------------------------------
 # Display content formatting
 # --------------------------------------------------------------------------
-def _format_content(content):
-    """Extract human-readable text from a display content object."""
+def _format_content(content, live_selected_names=None):
+    """Extract human-readable text from a display content object.
+
+    live_selected_names, if given, is a set of names Live's own UI focus
+    is currently on (selected track/scene).  Ableton Live narrates its
+    own focus changes independently of this hook, so when the OLED's
+    "name: value" pair repeats a name Live just announced, only the new
+    information (value) is spoken to avoid saying the name twice.
+    """
     lines = getattr(content, "lines", None)
     if not lines:
         return None
@@ -312,6 +319,8 @@ def _format_content(content):
         content, _content_types["horizontal"]
     ):
         if len(text_lines) == 2:
+            if live_selected_names and text_lines[0] in live_selected_names:
+                return text_lines[1]
             return text_lines[0] + ": " + text_lines[1]
         return ", ".join(text_lines)
 
@@ -322,6 +331,29 @@ def _format_content(content):
         return " ".join(text_lines)
 
     return ", ".join(text_lines)
+
+
+def _get_live_selected_names(control_surface):
+    """Names Live's own UI focus is currently on (selected track/scene).
+
+    Used to avoid repeating a name Live's own native narration is
+    expected to have just announced.  Defensive: must never raise, since
+    it runs on every display update.
+    """
+    names = set()
+    try:
+        track = control_surface.song.view.selected_track
+        if track is not None and getattr(track, "name", None):
+            names.add(track.name)
+    except Exception:
+        pass
+    try:
+        scene = control_surface.song.view.selected_scene
+        if scene is not None and getattr(scene, "name", None):
+            names.add(scene.name)
+    except Exception:
+        pass
+    return names
 
 
 # --------------------------------------------------------------------------
@@ -377,7 +409,8 @@ def _install_display_hook(control_surface):
 
     def _intercepted_display(content):
         try:
-            text = _format_content(content)
+            live_selected_names = _get_live_selected_names(control_surface)
+            text = _format_content(content, live_selected_names)
             if text and text != last_announced[0]:
                 last_announced[0] = text
                 if debounce_enabled and debounce_delay > 0:
