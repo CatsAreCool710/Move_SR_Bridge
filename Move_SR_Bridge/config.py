@@ -17,7 +17,10 @@
 Configuration loader for Move-SR-Bridge.
 
 Reads settings from ~/.move_sr_bridge/config.ini.  If the file does not
-exist, it is created with documented defaults on first load.
+exist, it is created with documented defaults on first load.  This
+module is also the single source of truth for the per-user state
+directory (STATE_DIR / CONFIG_FILE / LOG_PATH) shared by the remote
+script and sr_helper.
 
 Sections:
     [debounce]  -- Display-update debounce / flood control
@@ -33,8 +36,15 @@ import os
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".move_sr_bridge")
-_CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.ini")
+# Per-user state directory.  This is the single source of truth for where
+# Move-SR-Bridge keeps everything it writes at runtime -- both processes
+# (the remote script inside Live and sr_helper) import these constants
+# rather than deriving their own paths.  It lives under the user's home
+# so it is always writable, unlike the install directory (Live's .app
+# bundle on macOS, C:\ProgramData on Windows).
+STATE_DIR = os.path.join(os.path.expanduser("~"), ".move_sr_bridge")
+CONFIG_FILE = os.path.join(STATE_DIR, "config.ini")
+LOG_PATH = os.path.join(STATE_DIR, "Move_SR_Bridge.log")
 
 _DEFAULT_CONFIG = """\
 [debounce]
@@ -68,36 +78,53 @@ _DEFAULTS = {
 }
 
 
+def ensure_state_dir():
+    """Create the per-user state directory.  Returns True on success.
+
+    Callable before logging is configured -- the logging bootstrap in
+    __init__.py and sr_helper.py needs the directory to exist before it
+    can open LOG_PATH.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def load_config():
     """Load configuration from ~/.move_sr_bridge/config.ini.
 
     Creates the config file with documented defaults if it does not exist.
+    This is the only place the default config is written -- installers
+    must not write their own copy, or the two will drift apart.
+
     Returns a configparser.ConfigParser with values already loaded.
     """
-    if not os.path.isfile(_CONFIG_FILE):
+    if not os.path.isfile(CONFIG_FILE):
         try:
-            os.makedirs(_CONFIG_DIR, exist_ok=True)
-            with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            ensure_state_dir()
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 f.write(_DEFAULT_CONFIG)
             logger.info(
-                "Move_SR_Bridge: Created default config at %s", _CONFIG_FILE
+                "Move_SR_Bridge: Created default config at %s", CONFIG_FILE
             )
         except OSError as e:
             logger.warning(
                 "Move_SR_Bridge: Could not create config file %s: %s",
-                _CONFIG_FILE,
+                CONFIG_FILE,
                 e,
             )
 
     config = configparser.ConfigParser()
     config.read_dict(_DEFAULTS)
-    if os.path.isfile(_CONFIG_FILE):
+    if os.path.isfile(CONFIG_FILE):
         try:
-            config.read(_CONFIG_FILE, encoding="utf-8")
+            config.read(CONFIG_FILE, encoding="utf-8")
         except configparser.Error as e:
             logger.warning(
                 "Move_SR_Bridge: Malformed config file %s, using defaults: %s",
-                _CONFIG_FILE,
+                CONFIG_FILE,
                 e,
             )
             config = configparser.ConfigParser()
