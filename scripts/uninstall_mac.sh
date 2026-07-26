@@ -14,102 +14,120 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# Removes Move_SR_Bridge from every location an installer could have put
+# it: the User Library recorded in Live's Library.cfg, the default User
+# Library, and inside any Live app bundle (where pre-User-Library versions
+# went, and where the installer's last-resort path lands).
+#
+# If your User Library is somewhere unusual, set:
+#   MOVE_SR_USER_LIBRARY="/path/to/User Library" scripts/uninstall_mac.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PACKAGE_NAME="Move_SR_Bridge"
+CONFIG_DIR="${HOME}/.move_sr_bridge"
+
+# shellcheck source=lib/resolve_install_dir.sh
+. "${SCRIPT_DIR}/lib/resolve_install_dir.sh"
+
+echo "Move-SR-Bridge macOS Uninstaller"
+echo "================================"
+echo ""
 
 # ---------------------------------------------------------------------------
-# Kill any running sr_helper_mac processes
+# Live must not be running
+# ---------------------------------------------------------------------------
+if pgrep -x Live >/dev/null 2>&1; then
+    echo "ERROR: Ableton Live is currently running."
+    echo "Quit Live and run this again."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Collect every location a copy could live in
+# ---------------------------------------------------------------------------
+TARGETS=()
+while IFS= read -r t; do
+    TARGETS+=("$t")
+done < <(msb_installed_dirs)
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+    echo "${PACKAGE_NAME} does not appear to be installed."
+    echo ""
+    echo "Checked:"
+    msb_all_candidate_dirs | sed 's/^/  /'
+    exit 0
+fi
+
+echo "Found ${#TARGETS[@]} installation(s):"
+echo ""
+for t in "${TARGETS[@]}"; do
+    echo "  ${t}"
+done
+echo ""
+
+# Under `set -e` a bare `read` that hits EOF would abort with no output.
+confirm=""
+read -rp "Remove all of the above? [y/N] " confirm || true
+if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    echo "Cancelled."
+    exit 0
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# Kill any running helper
 # ---------------------------------------------------------------------------
 if pgrep -x sr_helper_mac >/dev/null 2>&1; then
-    echo "Stopping running sr_helper_mac processes..."
+    echo "Stopping running sr_helper_mac..."
     pkill -x sr_helper_mac 2>/dev/null || true
     sleep 1
 fi
 
 # ---------------------------------------------------------------------------
-# Locate Ableton Live installations
+# Remove.  Copies inside a Live app bundle may be root-owned, so fall back
+# to sudo rather than failing outright.
 # ---------------------------------------------------------------------------
-LIVE_APPS=()
-for app in /Applications/Ableton\ Live*.app; do
-    [ -d "$app" ] && LIVE_APPS+=("$app")
-done
-
-if [ ${#LIVE_APPS[@]} -eq 0 ]; then
-    echo "No Ableton Live installations found in /Applications."
-    exit 0
-fi
-
-echo "Move-SR-Bridge macOS Uninstaller"
-echo "================================"
-echo ""
-echo "Found ${#LIVE_APPS[@]} Ableton Live installation(s):"
-echo ""
-
-FOUND=0
-for i in "${!LIVE_APPS[@]}"; do
-    app="${LIVE_APPS[$i]}"
-    name="$(basename "$app" .app)"
-    scripts_dir="${app}/Contents/App-Resources/MIDI Remote Scripts"
-    dest="${scripts_dir}/${PACKAGE_NAME}"
-    if [ -d "$dest" ]; then
-        echo "  $((i+1)). ${name} -- INSTALLED"
-        FOUND=$((FOUND+1))
+FAILED=()
+for t in "${TARGETS[@]}"; do
+    echo "Removing: ${t}"
+    if rm -rf "$t" 2>/dev/null; then
+        echo "  Done."
     else
-        echo "  $((i+1)). ${name} -- not installed"
+        echo "  Permission denied -- retrying with sudo..."
+        if sudo rm -rf "$t"; then
+            echo "  Done."
+        else
+            echo "  FAILED."
+            FAILED+=("$t")
+        fi
     fi
 done
+echo ""
 
-if [ "$FOUND" -eq 0 ]; then
+# ---------------------------------------------------------------------------
+# Offer to remove settings + log
+# ---------------------------------------------------------------------------
+if [ -d "$CONFIG_DIR" ]; then
+    rmcfg=""
+    read -rp "Also remove settings and log folder (${CONFIG_DIR})? [y/N] " rmcfg || true
+    if [ "$rmcfg" = "y" ] || [ "$rmcfg" = "Y" ]; then
+        rm -rf "$CONFIG_DIR"
+        echo "Removed ${CONFIG_DIR}"
+    else
+        echo "Kept ${CONFIG_DIR}"
+    fi
     echo ""
-    echo "${PACKAGE_NAME} is not installed in any Live installation."
-    exit 0
 fi
 
-echo ""
-echo "  A) Remove from ALL installations"
-echo "  Q) Quit"
-echo ""
-
-read -rp "Select installation number (or A for all): " selection
-
-SELECTED=()
-if [ "$selection" = "A" ] || [ "$selection" = "a" ]; then
-    SELECTED=("${!LIVE_APPS[@]}")
-elif [[ "$selection" =~ ^[0-9]+$ ]]; then
-    idx=$((selection - 1))
-    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#LIVE_APPS[@]}" ]; then
-        SELECTED=("$idx")
-    else
-        echo "ERROR: Invalid selection: $selection"
-        exit 1
-    fi
-else
-    echo "ERROR: Invalid selection: $selection"
+if [ ${#FAILED[@]} -gt 0 ]; then
+    echo "Uninstall completed with errors. Remove these manually:"
+    for p in "${FAILED[@]}"; do
+        echo "  ${p}"
+    done
     exit 1
 fi
 
-echo ""
-read -rp "Remove ${PACKAGE_NAME} from ${#SELECTED[@]} installation(s)? [y/N] " confirm
-if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-    echo "Cancelled."
-    exit 0
-fi
-
-echo ""
-for idx in "${SELECTED[@]}"; do
-    app="${LIVE_APPS[$idx]}"
-    name="$(basename "$app" .app)"
-    scripts_dir="${app}/Contents/App-Resources/MIDI Remote Scripts"
-    dest="${scripts_dir}/${PACKAGE_NAME}"
-
-    if [ -d "$dest" ]; then
-        echo "Removing from: ${name}"
-        rm -rf "$dest"
-        echo "  Done."
-    fi
-done
-
-echo ""
 echo "Uninstall complete."
 echo ""

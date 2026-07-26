@@ -4,12 +4,28 @@
 //
 // Compiled into a .app bundle via osacompile (see build.sh).
 // Uses macOS system dialogs which are fully VoiceOver accessible.
+//
+// Installs into the Ableton User Library's "Remote Scripts" folder, whose
+// location is read from Live's own Library.cfg where possible.  This
+// mirrors scripts/lib/resolve_install_dir.sh and
+// scripts/lib/ResolveInstallDir.ps1 -- keep the three in step, and see
+// CLAUDE.md "Install Location Resolution" for the rationale.
+//
+// Installing inside Live's application bundle is the last resort only.
+// That bundle is code-signed with a hardened runtime, so writing into it
+// breaks the signature seal, needs admin rights, and -- most importantly
+// -- is wiped by every Live update.  The User Library is per-user, always
+// writable, and survives updates.
+
+var PACKAGE_NAME = "Move_SR_Bridge";
+var USER_LIBRARY_DEFAULT = "/Music/Ableton/User Library";
+var REMOTE_SCRIPTS_DIRNAME = "Remote Scripts";
+var TITLE_INSTALL = "Move-SR-Bridge Installer";
+var TITLE_UNINSTALL = "Move-SR-Bridge Uninstaller";
 
 function run(argv) {
     var app = Application.currentApplication();
     app.includeStandardAdditions = true;
-
-    var PACKAGE_NAME = "Move_SR_Bridge";
 
     // The package is embedded inside this app's own bundle -- self-contained,
     // no sibling folder required.
@@ -23,7 +39,7 @@ function run(argv) {
                 "package is missing from the app bundle.\n\n" +
                 "Please re-download the installer.",
             {
-                withTitle: "Move-SR-Bridge Installer",
+                withTitle: TITLE_INSTALL,
                 buttons: ["OK"],
                 defaultButton: 1,
             }
@@ -50,31 +66,85 @@ function run(argv) {
     }
 
     if (mainChoice.buttonReturned === "Install") {
-        doInstall(app, fm, packageSrc, PACKAGE_NAME);
+        doInstall(app, fm, packageSrc);
     } else if (mainChoice.buttonReturned === "Uninstall") {
-        doUninstall(app, fm, PACKAGE_NAME);
+        doUninstall(app, fm);
     }
 }
 
 // ---------------------------------------------------------------------------
 //  Installation
 // ---------------------------------------------------------------------------
-function doInstall(app, fm, packageSrc, packageName) {
-    // Check if Live is running
+function doInstall(app, fm, packageSrc) {
+    // Live only scans Remote Scripts at startup, so it must be restarted
+    // for the install to take effect either way.
     if (isLiveRunning(app)) {
         return;
     }
 
-    // Detect Live installations
-    var liveApps = detectLiveApps();
-    if (liveApps.length === 0) {
+    var resolved = resolveRemoteScriptsDir(app);
+    if (resolved === null) return;
+
+    var dest = resolved.path + "/" + PACKAGE_NAME;
+
+    // Confirm
+    try {
         app.displayDialog(
-            "No Ableton Live installations found in /Applications.\n\n" +
-                "If Live is installed elsewhere, copy the " +
-                packageName +
-                "/ folder to your Live MIDI Remote Scripts directory manually.",
+            "This will install Move-SR-Bridge to:\n\n" +
+                dest +
+                "\n\n(Located by: " +
+                resolved.source +
+                ")\n\nContinue?",
             {
-                withTitle: "Move-SR-Bridge Installer",
+                withTitle: TITLE_INSTALL,
+                buttons: ["Install", "Cancel"],
+                defaultButton: 1,
+                cancelButton: 2,
+            }
+        );
+    } catch (e) {
+        return;
+    }
+
+    // A helper left over from a previous session would keep port 8765 and
+    // go on running the old binary after we replace the files.
+    stopHelper(app);
+
+    // A last-resort install lands inside a root-owned app bundle, so the
+    // copy itself needs the authorisation prompt too.
+    //
+    // Staged rather than in place, matching install_mac.sh.  The old copy
+    // is only removed once the new one is complete and sitting beside it,
+    // so a failure part-way through cannot leave the user with the old
+    // install deleted and no new one -- which "rm -rf dest && cp -R" did
+    // whenever the rm was permitted and the cp was not.
+    var stage = dest + ".new." + $.NSProcessInfo.processInfo.processIdentifier;
+    var backup = dest + ".old." + $.NSProcessInfo.processInfo.processIdentifier;
+    var copyCmd =
+        "set -e; " +
+        "rm -rf " + shQuote(stage) + " " + shQuote(backup) + "; " +
+        "cp -R " + shQuote(packageSrc) + " " + shQuote(stage) + "; " +
+        "rm -rf " + shQuote(stage) + "/__pycache__; " +
+        "chmod +x " + shQuote(stage + "/sr_helper_mac") + " 2>/dev/null || true; " +
+        // Swap only now that the new copy is known good.  If the final
+        // move fails, put the old one back rather than leaving nothing.
+        "if [ -d " + shQuote(dest) + " ]; then " +
+        "mv " + shQuote(dest) + " " + shQuote(backup) + "; fi; " +
+        "if mv " + shQuote(stage) + " " + shQuote(dest) + "; then " +
+        "rm -rf " + shQuote(backup) + "; " +
+        "else " +
+        "if [ -d " + shQuote(backup) + " ]; then mv " + shQuote(backup) + " " +
+        shQuote(dest) + "; fi; " +
+        "rm -rf " + shQuote(stage) + "; exit 1; " +
+        "fi";
+
+    if (!runPrivileged(app, copyCmd, resolved.lastResort,
+                       "Move-SR-Bridge needs permission to install inside " +
+                       "Ableton Live's application folder.")) {
+        app.displayDialog(
+            "Move-SR-Bridge could not be installed to:\n\n" + dest,
+            {
+                withTitle: TITLE_INSTALL,
                 buttons: ["OK"],
                 defaultButton: 1,
             }
@@ -82,93 +152,38 @@ function doInstall(app, fm, packageSrc, packageName) {
         return;
     }
 
-    // Select installation(s)
-    var selected = selectInstallations(app, liveApps, "install");
-    if (selected.length === 0) return;
+    // Any copy at a different location must go: two packages with the same
+    // name on Live's script search path is ambiguous, and the stale one
+    // would keep shadowing this install.
+    var sweep = removeStaleInstalls(app, fm, dest);
 
-    // Confirm
-    var confirmMsg =
-        "This will install Move-SR-Bridge to " +
-        selected.length +
-        " Live installation(s):\n\n";
-    for (var i = 0; i < selected.length; i++) {
-        confirmMsg += "  " + liveApps[selected[i]].name + "\n";
-    }
-    confirmMsg += "\nContinue?";
+    var msg = "Move-SR-Bridge installed successfully!\n\n";
+    msg += "Installed to:\n  " + dest + "\n";
+    msg += "Located by: " + resolved.source + "\n\n";
 
-    try {
-        app.displayDialog(confirmMsg, {
-            withTitle: "Move-SR-Bridge Installer",
-            buttons: ["Install", "Cancel"],
-            defaultButton: 1,
-            cancelButton: 2,
-        });
-    } catch (e) {
-        return;
+    if (resolved.lastResort) {
+        msg +=
+            "WARNING: this copy is inside Live's application bundle and\n" +
+            "will be erased by the next Live update. Reinstall after each\n" +
+            "one, or open Live once to create your User Library and run\n" +
+            "this installer again.\n\n";
     }
 
-    // Install to each selected Live -- each installation is independent, so
-    // a failure on one shouldn't abort the rest of the batch.
-    var installed = [];
-    var failed = [];
-    for (var i = 0; i < selected.length; i++) {
-        var live = liveApps[selected[i]];
-        var dest = live.scriptsDir + "/" + packageName;
-        try {
-            if (fm.fileExistsAtPath(dest)) {
-                doShell(app, "rm -rf " + shQuote(dest));
-            }
-            doShell(app, "cp -R " + shQuote(packageSrc) + " " + shQuote(dest));
-
-            var helperPath = dest + "/sr_helper_mac";
-            if (fm.fileExistsAtPath(helperPath)) {
-                doShell(app, "chmod +x " + shQuote(helperPath));
-            }
-            installed.push(live.name);
-        } catch (e) {
-            failed.push(live.name);
-        }
-    }
-
-    if (installed.length === 0) {
-        var failMsg = "Move-SR-Bridge could not be installed to any selected installation:\n\n";
-        for (var i = 0; i < failed.length; i++) {
-            failMsg += "  " + failed[i] + "\n";
-        }
-        app.displayDialog(failMsg, {
-            withTitle: "Move-SR-Bridge Installer",
-            buttons: ["OK"],
-            defaultButton: 1,
-        });
-        return;
-    }
-
-    // Create config if it doesn't exist
-    var configOk = ensureConfig(app, fm);
-
-    // Success (or partial success)
-    var msg =
-        failed.length === 0
-            ? "Move-SR-Bridge installed successfully!\n\n"
-            : "Move-SR-Bridge installed with some errors.\n\n";
-
-    msg += "Installed to:\n";
-    for (var i = 0; i < installed.length; i++) {
-        msg += "  " + installed[i] + "\n";
-    }
-    msg += "\n";
-
-    if (failed.length > 0) {
-        msg += "Failed for:\n";
-        for (var i = 0; i < failed.length; i++) {
-            msg += "  " + failed[i] + "\n";
+    if (sweep.removed.length > 0) {
+        msg += "Removed stale copies from:\n";
+        for (var i = 0; i < sweep.removed.length; i++) {
+            msg += "  " + sweep.removed[i] + "\n";
         }
         msg += "\n";
     }
-
-    if (!configOk) {
-        msg += "Warning: could not create the default config file at\n" +
-            "~/.move_sr_bridge/config.ini -- defaults will be used.\n\n";
+    if (sweep.failed.length > 0) {
+        msg +=
+            "WARNING: an old copy is still on Live's search path and may\n" +
+            "override this install. Remove it manually:\n";
+        for (var i = 0; i < sweep.failed.length; i++) {
+            msg += "  " + sweep.failed[i] + "\n";
+        }
+        msg += "\n";
     }
 
     msg +=
@@ -183,10 +198,12 @@ function doInstall(app, fm, packageSrc, packageName) {
         "  3. Go to General > check 'Allow VoiceOver to be\n" +
         "     controlled with AppleScript'\n\n" +
         "Config file: ~/.move_sr_bridge/config.ini\n" +
-        "  (edit to customise debounce settings)";
+        "  (created on first Live launch -- edit to customise\n" +
+        "   debounce and logging settings)\n\n" +
+        "Log file: ~/.move_sr_bridge/Move_SR_Bridge.log";
 
     app.displayDialog(msg, {
-        withTitle: "Move-SR-Bridge Installer",
+        withTitle: TITLE_INSTALL,
         buttons: ["OK"],
         defaultButton: 1,
     });
@@ -195,28 +212,23 @@ function doInstall(app, fm, packageSrc, packageName) {
 // ---------------------------------------------------------------------------
 //  Uninstallation
 // ---------------------------------------------------------------------------
-function doUninstall(app, fm, packageName) {
-    // Check if Live is running
+function doUninstall(app, fm) {
     if (isLiveRunning(app)) {
         return;
     }
 
-    // Detect Live installations and check which have Move_SR_Bridge installed
-    var liveApps = detectLiveApps();
-    var installedApps = [];
+    // Gather every place a copy could live -- the same candidate list the
+    // installer resolves against, so a relocated User Library is covered.
+    var targets = installedPackageDirs(app, fm);
 
-    for (var i = 0; i < liveApps.length; i++) {
-        var dest = liveApps[i].scriptsDir + "/" + packageName;
-        if (fm.fileExistsAtPath(dest)) {
-            installedApps.push(liveApps[i]);
-        }
-    }
-
-    if (installedApps.length === 0) {
+    if (targets.length === 0) {
+        var checked = candidatePackageDirs(app);
         app.displayDialog(
-            "Move-SR-Bridge is not installed in any Ableton Live installation.",
+            "Move-SR-Bridge does not appear to be installed.\n\n" +
+                "Checked:\n  " +
+                checked.join("\n  "),
             {
-                withTitle: "Move-SR-Bridge Uninstaller",
+                withTitle: TITLE_UNINSTALL,
                 buttons: ["OK"],
                 defaultButton: 1,
             }
@@ -224,47 +236,15 @@ function doUninstall(app, fm, packageName) {
         return;
     }
 
-    // Select which to remove
-    var names = [];
-    for (var i = 0; i < installedApps.length; i++) {
-        names.push(installedApps[i].name);
+    var confirmMsg = "Remove Move-SR-Bridge from:\n\n";
+    for (var i = 0; i < targets.length; i++) {
+        confirmMsg += "  " + targets[i].label + "\n";
     }
-
-    var selected;
-    if (installedApps.length === 1) {
-        try {
-            app.displayDialog(
-                "Move-SR-Bridge is installed in:\n  " +
-                    names[0] +
-                    "\n\nRemove it?",
-                {
-                    withTitle: "Move-SR-Bridge Uninstaller",
-                    buttons: ["Remove", "Cancel"],
-                    defaultButton: 1,
-                    cancelButton: 2,
-                }
-            );
-        } catch (e) {
-            return;
-        }
-        selected = [0];
-    } else {
-        selected = selectInstallations(app, installedApps, "uninstall");
-        if (selected.length === 0) return;
-    }
-
-    // Confirm
-    var confirmMsg =
-        "Remove Move-SR-Bridge from " +
-        selected.length +
-        " installation(s)?\n\n";
-    for (var i = 0; i < selected.length; i++) {
-        confirmMsg += "  " + installedApps[selected[i]].name + "\n";
-    }
+    confirmMsg += "\nContinue?";
 
     try {
         app.displayDialog(confirmMsg, {
-            withTitle: "Move-SR-Bridge Uninstaller",
+            withTitle: TITLE_UNINSTALL,
             buttons: ["Remove", "Cancel"],
             defaultButton: 1,
             cancelButton: 2,
@@ -273,52 +253,41 @@ function doUninstall(app, fm, packageName) {
         return;
     }
 
-    // Stop helper processes (harmless no-op if none running -- "|| true"
-    // keeps the exit code 0 so this never throws)
-    doShell(app, "pkill -x sr_helper_mac 2>/dev/null || true");
+    stopHelper(app);
 
-    // Remove from each selected installation -- independent per-installation,
-    // so a failure on one shouldn't abort the rest of the batch.
     var removed = [];
     var failed = [];
-    for (var i = 0; i < selected.length; i++) {
-        var live = installedApps[selected[i]];
-        var dest = live.scriptsDir + "/" + packageName;
-        if (fm.fileExistsAtPath(dest)) {
-            try {
-                doShell(app, "rm -rf " + shQuote(dest));
-                removed.push(live.name);
-            } catch (e) {
-                failed.push(live.name);
-            }
+    for (var i = 0; i < targets.length; i++) {
+        if (removePath(app, targets[i].path, targets[i].inBundle)) {
+            removed.push(targets[i].label);
+        } else {
+            failed.push(targets[i].label);
         }
     }
 
-    // Ask about config file. "Keep Config" is also the cancel button, so
+    // Ask about the config file. "Keep Config" is also the cancel button, so
     // Escape/Return-on-default and clicking "Keep Config" all take the same
     // safe no-delete path via the catch block below.
-    var configDir =
-        ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge";
+    var configDir = ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge";
     if (fm.fileExistsAtPath(configDir)) {
         try {
             var configChoice = app.displayDialog(
-                "Also remove the config file?\n" + configDir,
+                "Also remove the settings and log folder?\n" + configDir,
                 {
-                    withTitle: "Move-SR-Bridge Uninstaller",
-                    buttons: ["Remove Config", "Keep Config"],
+                    withTitle: TITLE_UNINSTALL,
+                    buttons: ["Remove Settings", "Keep Settings"],
                     defaultButton: 2,
                     cancelButton: 2,
                 }
             );
-            if (configChoice.buttonReturned === "Remove Config") {
+            if (configChoice.buttonReturned === "Remove Settings") {
                 doShell(app, "rm -rf " + shQuote(configDir));
             }
         } catch (e) {
-            // Keep config (cancelled / "Keep Config" clicked)
+            // Keep settings (cancelled / "Keep Settings" clicked)
         }
     }
 
-    // Success (or partial success)
     var msg =
         failed.length === 0
             ? "Move-SR-Bridge uninstalled successfully!\n\n"
@@ -335,13 +304,435 @@ function doUninstall(app, fm, packageName) {
         for (var i = 0; i < failed.length; i++) {
             msg += "  " + failed[i] + "\n";
         }
+        msg += "\nRemove these manually.";
     }
 
     app.displayDialog(msg, {
-        withTitle: "Move-SR-Bridge Uninstaller",
+        withTitle: TITLE_UNINSTALL,
         buttons: ["OK"],
         defaultButton: 1,
     });
+}
+
+// ---------------------------------------------------------------------------
+//  User Library resolution
+//
+//  Order: MOVE_SR_USER_LIBRARY -> Live's Library.cfg -> the default
+//  location -> create the default -> ask the user -> inside Live itself.
+//  The last step is a genuine last resort; see the file header.
+// ---------------------------------------------------------------------------
+function defaultUserLibrary() {
+    return ObjC.unwrap($.NSHomeDirectory()) + USER_LIBRARY_DEFAULT;
+}
+
+// Where a hand-picked User Library gets recorded.
+//
+// Only this installer can end up somewhere none of the three resolvers
+// would ever derive on their own -- the "choose a folder" branch, taken
+// when the default library cannot be created.  Without a record, that copy
+// is invisible to every uninstaller and to the next install's stale sweep,
+// so it sits on Live's search path shadowing the new package forever.
+// Written here, read by all three implementations.
+var RECORDED_LIBRARY_FILE =
+    ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge/install_location";
+
+function recordChosenLibrary(app, lib) {
+    try {
+        doShell(
+            app,
+            "mkdir -p " +
+                shQuote(ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge") +
+                " && printf '%s\\n' " +
+                shQuote(lib) +
+                " > " +
+                shQuote(RECORDED_LIBRARY_FILE)
+        );
+    } catch (e) {
+        // Not fatal: the install itself succeeded, and the only cost is
+        // that a later uninstall will not find this copy automatically.
+    }
+}
+
+function recordedUserLibrary() {
+    try {
+        var fm = $.NSFileManager.defaultManager;
+        if (!fm.fileExistsAtPath(RECORDED_LIBRARY_FILE)) return null;
+        var text = ObjC.unwrap(
+            $.NSString.stringWithContentsOfFileEncodingError(
+                RECORDED_LIBRARY_FILE,
+                $.NSUTF8StringEncoding,
+                null
+            )
+        );
+        if (!text) return null;
+        var line = String(text).split(/[\r\n]+/)[0].trim();
+        return line ? stripTrailingSlashes(line) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function envUserLibrary() {
+    try {
+        var v = ObjC.unwrap(
+            $.NSProcessInfo.processInfo.environment.objectForKey(
+                "MOVE_SR_USER_LIBRARY"
+            )
+        );
+        return v ? stripTrailingSlashes(String(v)) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Live never deletes old preference folders, and version-number order is
+// NOT the same as "most recently used" -- a 12.4.5 beta can sit next to a
+// 12.4.3 that is the one actually running.  Sort by modification time.
+//
+// `ls -t | head -1` rather than NSFileManager attribute sorting: these
+// paths contain spaces, and shelling out matches the .sh resolver exactly.
+function newestLibraryCfg(app) {
+    var prefs = ObjC.unwrap($.NSHomeDirectory()) + "/Library/Preferences/Ableton";
+    try {
+        var out = doShell(
+            app,
+            "ls -t " +
+                shQuote(prefs) +
+                "/*/Library.cfg " +
+                shQuote(prefs) +
+                "/*/Preferences/Library.cfg 2>/dev/null | head -1"
+        );
+        out = String(out).trim();
+        return out === "" ? null : out;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Library.cfg is plain XML:
+//   <UserLibrary><LibraryProject Id="0">
+//     <ProjectName Value="User Library" />
+//     <ProjectPath Value="/Users/you/Music/Ableton" />
+// The library lives at ProjectPath/ProjectName.
+function userLibraryFromConfig(app) {
+    var cfg = newestLibraryCfg(app);
+    if (!cfg) return null;
+
+    var text = ObjC.unwrap(
+        $.NSString.stringWithContentsOfFileEncodingError(
+            cfg,
+            $.NSUTF8StringEncoding,
+            null
+        )
+    );
+    if (!text) return null;
+
+    // [\r\n], not \r?\n: a lone CR is a line break too, and treating it as
+    // content would leave the whole file on one "line" here while the
+    // shell's `tr -d '\n\r'` handled it. Same input, same result, in all
+    // three implementations.
+    var flat = String(text).replace(/[\r\n]/g, "");
+    var block = flat.match(/<UserLibrary>([\s\S]*?)<\/UserLibrary>/);
+    if (!block) return null;
+
+    var pathMatch = block[1].match(/<ProjectPath\s+Value="([^"]*)"/);
+    if (!pathMatch) return null;
+    var nameMatch = block[1].match(/<ProjectName\s+Value="([^"]*)"/);
+    var name = nameMatch ? nameMatch[1] : "User Library";
+
+    // Strip BEFORE joining, not after: ProjectPath is Live-controlled data
+    // and may carry a trailing slash, which would otherwise survive in the
+    // middle of the result as "/path//User Library". The .sh and .ps1
+    // resolvers both produce a single separator there, and the three are
+    // required to build byte-identical paths.
+    return stripTrailingSlashes(stripTrailingSlashes(pathMatch[1]) + "/" + name);
+}
+
+function stripTrailingSlashes(p) {
+    while (p.length > 1 && p.charAt(p.length - 1) === "/") {
+        p = p.substring(0, p.length - 1);
+    }
+    return p;
+}
+
+// Try to create dir; return true on success.
+function ensureDir(app, path) {
+    try {
+        doShell(app, "mkdir -p " + shQuote(path));
+        return dirExists(app, path);
+    } catch (e) {
+        return false;
+    }
+}
+
+// Returns {path: <Remote Scripts dir>, source: <how we found it>,
+// lastResort: bool}, or null if the user cancelled.
+function resolveRemoteScriptsDir(app) {
+    var override = envUserLibrary();
+    if (override) {
+        var dir = stripTrailingSlashes(override) + "/" + REMOTE_SCRIPTS_DIRNAME;
+        if (ensureDir(app, dir)) {
+            return {
+                path: dir,
+                source: "MOVE_SR_USER_LIBRARY override",
+                lastResort: false,
+            };
+        }
+        // An override that cannot be used is an error, not a reason to
+        // install somewhere the user did not ask for.
+        app.displayDialog(
+            "MOVE_SR_USER_LIBRARY is set to:\n\n" +
+                override +
+                "\n\nbut that folder does not exist and could not be created.",
+            { withTitle: TITLE_INSTALL, buttons: ["OK"], defaultButton: 1 }
+        );
+        return null;
+    }
+
+    var fromCfg = userLibraryFromConfig(app);
+    if (fromCfg && dirExists(app, fromCfg)) {
+        var d = fromCfg + "/" + REMOTE_SCRIPTS_DIRNAME;
+        if (ensureDir(app, d)) {
+            return {
+                path: d,
+                source: "Live's Library.cfg",
+                lastResort: false,
+            };
+        }
+    }
+
+    var def = defaultUserLibrary();
+    if (dirExists(app, def)) {
+        var d2 = def + "/" + REMOTE_SCRIPTS_DIRNAME;
+        if (ensureDir(app, d2)) {
+            return {
+                path: d2,
+                source: "default User Library location",
+                lastResort: false,
+            };
+        }
+    }
+
+    // No User Library exists yet -- create the default one, exactly as the
+    // .sh and .ps1 resolvers do at this step. Live picks it up on its next
+    // start. Without this the GUI installer prompted for a folder in a
+    // situation where install_mac.sh silently succeeded, so the same
+    // starting state gave two different experiences.
+    if (ensureDir(app, def + "/" + REMOTE_SCRIPTS_DIRNAME)) {
+        return {
+            path: def + "/" + REMOTE_SCRIPTS_DIRNAME,
+            source: "newly created default User Library",
+            lastResort: false,
+        };
+    }
+
+    // Could not even create it. Ask, rather than guess -- Live lets the
+    // library be relocated, and a folder made in the wrong place would
+    // simply never be scanned.
+    var chosen = askForUserLibrary(app, def);
+    if (chosen) {
+        var d3 = chosen + "/" + REMOTE_SCRIPTS_DIRNAME;
+        if (ensureDir(app, d3)) {
+            // Recorded so the uninstaller and the next install's sweep can
+            // still find this copy -- no resolver would ever derive this
+            // path on its own.
+            recordChosenLibrary(app, chosen);
+            return {
+                path: d3,
+                source: "folder you selected",
+                lastResort: false,
+            };
+        }
+    }
+
+    return offerLastResort(app);
+}
+
+// Offer to browse for the User Library.  Returns a path or null.
+function askForUserLibrary(app, defaultPath) {
+    try {
+        app.displayDialog(
+            "Could not find your Ableton User Library.\n\n" +
+                "Expected it at:\n" +
+                defaultPath +
+                "\n\nIf you moved it, choose its location on the next " +
+                "screen.\n\nLive shows the current path under\n" +
+                "Settings > Library > Location of User Library.",
+            {
+                withTitle: TITLE_INSTALL,
+                buttons: ["Choose Folder", "Cancel"],
+                defaultButton: 1,
+                cancelButton: 2,
+            }
+        );
+    } catch (e) {
+        return null;
+    }
+
+    try {
+        // chooseFolder can hand back a trailing slash; normalise it away so
+        // the path we build and later compare against stays consistent.
+        return stripTrailingSlashes(
+            String(
+                app.chooseFolder({
+                    withPrompt: "Select your Ableton User Library folder:",
+                })
+            )
+        );
+    } catch (e) {
+        return null; // Cancelled
+    }
+}
+
+// Absolute last resort: install inside Live's own application bundle.
+// Warn clearly first -- it needs admin rights, breaks Live's code
+// signature, and is erased by every Live update.
+function offerLastResort(app) {
+    var liveApps = detectLiveApps(app);
+    if (liveApps.length === 0) {
+        app.displayDialog(
+            "Could not find an Ableton User Library or an Ableton Live " +
+                "installation.\n\nOpen Live once so it creates your User " +
+                "Library, then run this installer again.",
+            { withTitle: TITLE_INSTALL, buttons: ["OK"], defaultButton: 1 }
+        );
+        return null;
+    }
+
+    var target = liveApps[0];   // newest by mtime
+    try {
+        app.displayDialog(
+            "No Ableton User Library could be found or created.\n\n" +
+                "Move-SR-Bridge can be installed inside Live itself:\n  " +
+                target.name +
+                "\n\nThis is not recommended. It needs an administrator " +
+                "password, breaks Live's code signature, and is erased by " +
+                "every Live update -- you would have to reinstall after " +
+                "each one.\n\nBetter: open Live once so it creates your " +
+                "User Library, then run this installer again.",
+            {
+                withTitle: TITLE_INSTALL,
+                buttons: ["Install Inside Live", "Cancel"],
+                defaultButton: 2,
+                cancelButton: 2,
+            }
+        );
+    } catch (e) {
+        return null;
+    }
+
+    return {
+        path: target.scriptsDir,
+        source: "inside Live's application bundle (last resort)",
+        lastResort: true,
+    };
+}
+
+// ---------------------------------------------------------------------------
+//  Enumerating every place a copy could be
+// ---------------------------------------------------------------------------
+
+// All package directories worth checking, whether they exist or not.
+function candidatePackageDirs(app) {
+    var out = [];
+    var seen = {};
+
+    function add(dir) {
+        if (dir && !seen[dir]) {
+            seen[dir] = true;
+            out.push(dir);
+        }
+    }
+
+    var override = envUserLibrary();
+    if (override) {
+        add(override + "/" + REMOTE_SCRIPTS_DIRNAME + "/" + PACKAGE_NAME);
+    }
+
+    var fromCfg = userLibraryFromConfig(app);
+    if (fromCfg) {
+        add(fromCfg + "/" + REMOTE_SCRIPTS_DIRNAME + "/" + PACKAGE_NAME);
+    }
+
+    var recorded = recordedUserLibrary();
+    if (recorded) {
+        add(recorded + "/" + REMOTE_SCRIPTS_DIRNAME + "/" + PACKAGE_NAME);
+    }
+
+    add(defaultUserLibrary() + "/" + REMOTE_SCRIPTS_DIRNAME + "/" + PACKAGE_NAME);
+
+    var liveApps = detectLiveApps(app);
+    for (var i = 0; i < liveApps.length; i++) {
+        add(liveApps[i].scriptsDir + "/" + PACKAGE_NAME);
+    }
+
+    return out;
+}
+
+// The subset that actually exists, tagged so callers know which ones may
+// need an authorisation prompt to delete.
+function installedPackageDirs(app, fm) {
+    var found = [];
+    var candidates = candidatePackageDirs(app);
+    for (var i = 0; i < candidates.length; i++) {
+        if (fm.fileExistsAtPath(candidates[i])) {
+            var inBundle = candidates[i].indexOf("/Contents/App-Resources/") !== -1;
+            found.push({
+                label: candidates[i] + (inBundle ? "  (inside app bundle)" : ""),
+                path: candidates[i],
+                inBundle: inBundle,
+            });
+        }
+    }
+    return found;
+}
+
+// Remove every copy except the one just installed.
+function removeStaleInstalls(app, fm, keepPath) {
+    var installed = installedPackageDirs(app, fm);
+    var removed = [];
+    var failed = [];
+    for (var i = 0; i < installed.length; i++) {
+        if (installed[i].path === keepPath) continue;
+        if (removePath(app, installed[i].path, installed[i].inBundle)) {
+            removed.push(installed[i].path);
+        } else {
+            failed.push(installed[i].path);
+        }
+    }
+    return { removed: removed, failed: failed };
+}
+
+// Delete a path, retrying with an authorisation prompt when it sits inside
+// a Live app bundle (which may be root-owned).
+function removePath(app, path, allowAdmin) {
+    return runPrivileged(
+        app,
+        "rm -rf " + shQuote(path),
+        allowAdmin,
+        "Move-SR-Bridge needs permission to remove an old copy from " +
+            "inside Ableton Live's application folder."
+    );
+}
+
+// Run a shell command, retrying once with an authorisation prompt if
+// allowed.  Returns true on success.
+function runPrivileged(app, command, allowAdmin, prompt) {
+    try {
+        doShell(app, command);
+        return true;
+    } catch (e) {
+        if (!allowAdmin) return false;
+    }
+    try {
+        app.doShellScript(command, {
+            administratorPrivileges: true,
+            withPrompt: prompt,
+        });
+        return true;
+    } catch (e2) {
+        return false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +743,27 @@ function getResourcesDir() {
     return ObjC.unwrap(bundleURL.path) + "/Contents/Resources";
 }
 
+function dirExists(app, path) {
+    try {
+        return (
+            doShell(
+                app,
+                "test -d " + shQuote(path) + " && echo yes || echo no"
+            ).trim() === "yes"
+        );
+    } catch (e) {
+        return false;
+    }
+}
+
+function stopHelper(app) {
+    try {
+        doShell(app, "pkill -x sr_helper_mac 2>/dev/null || true");
+    } catch (e) {
+        // Nothing running, or pkill unavailable -- harmless either way.
+    }
+}
+
 function isLiveRunning(app) {
     try {
         var result = doShell(app, "pgrep -x Live 2>/dev/null || true");
@@ -359,7 +771,8 @@ function isLiveRunning(app) {
             app.displayDialog(
                 "Ableton Live is currently running.\n\n" +
                     "Please quit Live before installing or uninstalling\n" +
-                    "Move-SR-Bridge.",
+                    "Move-SR-Bridge. Live only scans Remote Scripts when\n" +
+                    "it starts up.",
                 {
                     withTitle: "Move-SR-Bridge",
                     buttons: ["OK"],
@@ -374,22 +787,29 @@ function isLiveRunning(app) {
     return false;
 }
 
-function detectLiveApps() {
+function detectLiveApps(app) {
     var fm = $.NSFileManager.defaultManager;
     var appsDir = "/Applications";
     var contents = ObjC.unwrap(
         fm.contentsOfDirectoryAtPathError(appsDir, null)
     );
     var liveApps = [];
-    var regex = /^Ableton Live .+\.app$/;
+    if (!contents) return liveApps;
+
+    // Mirrors the shell's glob, /Applications/Ableton Live*.app -- note
+    // there is no space or ".+" after "Live".  The stricter form used to
+    // require a suffix ("Ableton Live 12 Suite"), so a plain
+    // "Ableton Live.app" was a candidate for install_mac.sh and invisible
+    // here: a copy one installer made was one the other could never sweep
+    // or uninstall, and it would silently shadow the new package.
+    var regex = /^Ableton Live.*\.app$/;
 
     for (var i = 0; i < contents.length; i++) {
         var name = ObjC.unwrap(contents[i]);
         if (regex.test(name)) {
             var appPath = appsDir + "/" + name;
             var scriptsDir =
-                appPath +
-                "/Contents/App-Resources/MIDI Remote Scripts";
+                appPath + "/Contents/App-Resources/MIDI Remote Scripts";
             if (fm.fileExistsAtPath(scriptsDir)) {
                 liveApps.push({
                     name: name.replace(/\.app$/, ""),
@@ -400,97 +820,47 @@ function detectLiveApps() {
         }
     }
 
-    // Sort alphabetically
+    // Newest by modification time first -- NOT alphabetical. As a string,
+    // "Ableton Live 9 Trial" sorts after "Ableton Live 11", so a name sort
+    // can pick a stale version over the one actually in use. The .sh and
+    // .ps1 resolvers both order by mtime; this must match them.
+    var order = liveAppsNewestFirst(app);
     liveApps.sort(function (a, b) {
-        return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+        var ia = order.indexOf(a.path);
+        var ib = order.indexOf(b.path);
+        if (ia === -1) ia = order.length;
+        if (ib === -1) ib = order.length;
+        return ia - ib;
     });
 
     return liveApps;
 }
 
-function selectInstallations(app, liveApps, action) {
-    if (liveApps.length === 1) {
-        return [0]; // Auto-select the only one
-    }
-
-    var labels = [];
-    for (var i = 0; i < liveApps.length; i++) {
-        labels.push(liveApps[i].name);
-    }
-
-    var prompt =
-        action === "install"
-            ? "Select which Ableton Live installation(s) to install to:"
-            : "Select which installation(s) to remove Move-SR-Bridge from:";
-
-    var chosen;
+// Bundle paths ordered newest-mtime-first, via the same `ls -td` the shell
+// resolver uses so the two cannot drift apart.
+//
+// Split on \r as well as \n: AppleScript's `do shell script` returns its
+// result with every newline translated to a carriage return, so splitting
+// on "\n" alone yielded ONE element containing every path run together.
+// detectLiveApps() then found -1 for every indexOf(), scored them all
+// equal, and the mtime sort silently became a no-op -- leaving the
+// alphabetical order this exists to replace.
+function liveAppsNewestFirst(app) {
     try {
-        chosen = app.chooseFromList(labels, {
-            withPrompt: prompt,
-            OKButtonName: action === "install" ? "Install" : "Remove",
-            multipleSelectionsAllowed: true,
+        var out = doShell(app, "ls -td /Applications/Ableton\\ Live*.app 2>/dev/null");
+        return String(out).split(/[\r\n]+/).map(stripTrailingSlashes).filter(function (l) {
+            return l !== "";
         });
     } catch (e) {
-        return []; // Cancelled
+        return [];
     }
-
-    if (chosen === false) {
-        return []; // Cancelled -- chooseFromList returns false, it doesn't throw
-    }
-
-    // Match each chosen label to exactly one liveApps entry (consume the
-    // label once it's matched) so duplicate display names can't cause a
-    // single selection to map to more than one underlying installation.
-    var selected = [];
-    var remaining = chosen.slice();
-    for (var i = 0; i < liveApps.length; i++) {
-        var idx = remaining.indexOf(liveApps[i].name);
-        if (idx !== -1) {
-            selected.push(i);
-            remaining.splice(idx, 1);
-        }
-    }
-    return selected;
 }
 
-function ensureConfig(app, fm) {
-    var configDir =
-        ObjC.unwrap($.NSHomeDirectory()) + "/.move_sr_bridge";
-    var configFile = configDir + "/config.ini";
-
-    if (fm.fileExistsAtPath(configFile)) {
-        return true;
-    }
-
-    // Create directory
-    try {
-        doShell(app, "mkdir -p " + shQuote(configDir));
-    } catch (e) {
-        return false;
-    }
-
-    // Write default config
-    var defaultConfig =
-        "[debounce]\n" +
-        "# Enable debounce for display updates.  When enabled, speech is delayed\n" +
-        "# until no display updates occur for 'delay_ms' milliseconds.\n" +
-        "# This prevents rapid-fire speech during encoder turns.\n" +
-        "enabled = true\n" +
-        "\n" +
-        "# Milliseconds to wait after the last display update before speaking.\n" +
-        "# Lower values feel more responsive; higher values reduce chatter.\n" +
-        "# Set to 0 to effectively disable debounce even if enabled = true.\n" +
-        "delay_ms = 300\n";
-
-    var nsStr = $.NSString.stringWithString(defaultConfig);
-    var ok = nsStr.writeToFileAtomicallyEncodingError(
-        configFile,
-        true,
-        $.NSUTF8StringEncoding,
-        null
-    );
-    return Boolean(ok);
-}
+// NOTE: this installer deliberately does NOT write ~/.move_sr_bridge/config.ini.
+// config.py owns the default config and creates it on first Live launch.  An
+// installer-side copy drifted out of sync once already (it was missing the
+// whole [logging] section, so the documented "set level = DEBUG" diagnostic
+// workflow pointed at a key that did not exist in the file users actually had).
 
 // Escape a string for safe embedding as a single-quoted POSIX shell argument.
 function shQuote(str) {

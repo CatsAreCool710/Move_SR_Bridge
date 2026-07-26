@@ -2,85 +2,65 @@
 REM uninstall.bat - Uninstall Move-SR-Bridge from Ableton Live
 REM Copyright (C) 2026 Jeremiah Ticket
 REM Licensed under GPLv3 -- see LICENSE for details.
+REM
+REM Removes Move-SR-Bridge from every location an installer could have put
+REM it: the User Library recorded in Live's Library.cfg, the default User
+REM Library, and the old C:\ProgramData\Ableton\Live *\Resources\MIDI
+REM Remote Scripts trees.  See scripts\lib\ResolveInstallDir.ps1.
 
 setlocal enabledelayedexpansion
 
 echo Move-SR-Bridge Uninstaller
 echo ===========================
 echo.
-echo This script will remove Move-SR-Bridge from Ableton Live's MIDI Remote Scripts folder.
-echo.
 
-REM --- Enumerate Ableton Live 12 installations ---
+set "SCRIPT_PATH=%~dp0"
+set "RESOLVER=%SCRIPT_PATH%lib\ResolveInstallDir.ps1"
+if not exist "%RESOLVER%" (
+    echo ERROR: Cannot find %RESOLVER%
+    echo The scripts\lib\ folder is missing from this download.
+    pause
+    exit /b 1
+)
+
+REM --- Enumerate every existing installation ---
+REM The resolver is run twice (list, then remove) rather than stashed in a
+REM pseudo-array. An array would need delayed expansion for its index, and
+REM that would eat any '!' in the paths -- which is legal in a folder name.
+REM Delayed expansion stays OFF for both passes.
+setlocal disabledelayedexpansion
 set "COUNT=0"
-for /d %%D in ("C:\ProgramData\Ableton\Live 12*") do (
-    set "CANDIDATE=%%D\Resources\MIDI Remote Scripts"
-    if exist "!CANDIDATE!" (
-        set /a COUNT+=1
-        set "DIR_!COUNT!=%%D"
-        set "SCRIPTS_!COUNT!=!CANDIDATE!"
-        for %%N in ("%%D") do set "NAME_!COUNT!=%%~nxN"
-    )
+echo Installations found:
+echo.
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%RESOLVER%" -List`) do (
+    set /a COUNT+=1
+    echo   %%P
 )
+endlocal & set "COUNT=%COUNT%"
 
-if %COUNT%==0 (
-    echo ERROR: Could not find any Ableton Live 12 MIDI Remote Scripts directory.
-    echo Expected: C:\ProgramData\Ableton\Live 12*\Resources\MIDI Remote Scripts\
+if "%COUNT%"=="0" (
+    echo   ^(none^)
     echo.
-    echo Nothing to uninstall.
+    echo Move-SR-Bridge does not appear to be installed.
+    echo.
+    echo Checked your Ableton User Library and
+    echo C:\ProgramData\Ableton\Live *\Resources\MIDI Remote Scripts\
     pause
-    exit /b 1
+    exit /b 0
 )
-
-REM --- Select target version ---
-if %COUNT%==1 (
-    set "SEL=1"
-    echo Detected: !NAME_1!
-    goto :selected
-)
-
-REM Multiple installations found
-echo Multiple Ableton Live installations found:
-for /l %%I in (1,1,%COUNT%) do (
-    echo   %%I. !NAME_%%I!
-)
-echo   A. All of the above
 echo.
 
-REM Check for command-line argument
-if not "%~1"=="" (
-    set "SEL=%~1"
-    echo Using command-line selection: !SEL!
-    goto :validate
-)
-
-set /p SEL="Select version [1-%COUNT%, A]: "
-
-:validate
-REM Validate selection
-if /i "!SEL!"=="A" goto :selected
-
-REM Check if it's a valid number
-set "VALID=0"
-for /l %%I in (1,1,%COUNT%) do (
-    if "!SEL!"=="%%I" set "VALID=1"
-)
-if "!VALID!"=="0" (
-    echo ERROR: Invalid selection "!SEL!". Please enter 1-%COUNT% or A.
+REM Cleared first, and this one matters most: `set /p` leaves the variable
+REM untouched on a bare Enter, so a YN=Y inherited from the environment
+REM would answer a destructive prompt on the user's behalf.
+set "YN="
+set /p YN="Remove all of the above? [Y/N]: "
+if /i not "%YN%"=="Y" (
+    echo Cancelled.
     pause
-    exit /b 1
+    exit /b 0
 )
-
-:selected
-
-REM --- Build list of targets ---
-if /i "!SEL!"=="A" (
-    set "FIRST=1"
-    set "LAST=%COUNT%"
-) else (
-    set "FIRST=!SEL!"
-    set "LAST=!SEL!"
-)
+echo.
 
 REM --- Kill running sr_helper.exe if found ---
 tasklist /FI "IMAGENAME eq sr_helper.exe" 2>nul | find /I "sr_helper.exe" >nul
@@ -92,42 +72,60 @@ if !ERRORLEVEL!==0 (
     echo.
 )
 
-REM --- Remove from each selected target ---
+REM --- Remove (second resolver pass; see the note above) ---
+setlocal disabledelayedexpansion
 set "REMOVED=0"
-for /l %%I in (!FIRST!,1,!LAST!) do (
-    set "DEST=!SCRIPTS_%%I!\Move_SR_Bridge"
-    echo.
-
-    if not exist "!DEST!" (
-        echo Move-SR-Bridge is not installed in !NAME_%%I!. Skipping.
+set "FAIL=0"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%RESOLVER%" -List`) do (
+    echo Removing: %%P
+    rmdir /s /q "%%P" 2>nul
+    if exist "%%P" (
+        echo   FAILED. A copy under C:\ProgramData needs Administrator rights.
+        set "FAIL=1"
     ) else (
-        echo Found Move-SR-Bridge in !NAME_%%I!:
-        echo   !DEST!
-        echo.
-        set /p YN="Remove Move-SR-Bridge from !NAME_%%I!? [Y/N]: "
-        if /i "!YN!"=="Y" (
-            rmdir /s /q "!DEST!"
-            if !ERRORLEVEL! neq 0 (
-                echo ERROR: Failed to remove !DEST!. Try running as Administrator.
-            ) else (
-                echo Removed from !NAME_%%I! successfully.
-                set /a REMOVED+=1
-            )
-        ) else (
-            echo Skipped !NAME_%%I!.
-        )
+        echo   Done.
+        set /a REMOVED+=1
     )
 )
+endlocal & set "REMOVED=%REMOVED%" & set "FAIL=%FAIL%"
+echo.
 
-echo.
-if !REMOVED! gtr 0 (
-    echo ================================================
-    echo   Uninstallation complete!
-    echo ================================================
-    echo.
-    echo Removed Move-SR-Bridge from !REMOVED! installation^(s^).
-) else (
-    echo No installations were removed.
+if "%FAIL%"=="1" (
+    echo Uninstall completed with errors -- see above.
+    echo Re-run this script as Administrator to remove the rest.
+    pause
+    exit /b 1
 )
+
+echo ================================================
+echo   Uninstallation complete!
+echo ================================================
 echo.
+echo Removed Move-SR-Bridge from %REMOVED% location^(s^).
+echo.
+
+REM --- Offer to remove the settings/log folder ---
+REM uninstall_mac.sh and the graphical installer both ask.  This one used to
+REM tell the user to do it by hand, so the same uninstall left different
+REM state behind depending on which platform you ran it on.
+if exist "%USERPROFILE%\.move_sr_bridge" (
+    echo Your settings and log are at:
+    echo   %USERPROFILE%\.move_sr_bridge
+    echo.
+    REM Cleared first, as with the YN prompt above.
+    set "DELCFG="
+    set /p DELCFG="Remove them too? [Y/N]: "
+    if /i "!DELCFG!"=="Y" (
+        rmdir /s /q "%USERPROFILE%\.move_sr_bridge" 2>nul
+        if exist "%USERPROFILE%\.move_sr_bridge" (
+            echo   FAILED -- remove it by hand.
+        ) else (
+            echo   Removed.
+        )
+    ) else (
+        echo   Kept.
+    )
+    echo.
+)
+
 pause
