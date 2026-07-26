@@ -9,7 +9,53 @@ permissions:
   contents: write
 
 jobs:
+  # The log file is this project's primary support artefact, so a release
+  # whose reported version disagrees with its tag would make every future
+  # bug report ambiguous. Gate both build jobs on the two matching.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify version.py matches the tag
+        run: |
+          version="$(python3 -c 'import sys; sys.path.insert(0, "Move_SR_Bridge"); import version; print(version.__version__)')"
+          if [ "v${version}" != "${{ github.ref_name }}" ]; then
+            echo "::error::Move_SR_Bridge/version.py says ${version} (tag v${version}) but this tag is ${{ github.ref_name }}."
+            echo "Bump __version__ in Move_SR_Bridge/version.py, or retag."
+            exit 1
+          fi
+          echo "Version ${version} matches tag ${{ github.ref_name }}"
+
+  # The suite runs without Live, hardware, or any dependency, so it costs a
+  # few seconds and catches the regressions that used to surface only after
+  # a release. Note this adds no new trigger: the workflow is still tag-only
+  # by design, so nothing runs on push or PR -- the tests are a release gate,
+  # not a per-commit check.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 3.11 on purpose: that is what Live embeds, so this run also proves
+      # the package carries no 3.12+ syntax. (The helper binaries are still
+      # frozen against 3.13 in the build jobs below -- they run as their own
+      # process and are not bound by Live's interpreter.)
+      - name: Setup Python 3.11 (matches Live's embedded interpreter)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Byte-compile everything under Live's Python version
+        run: python -m compileall -q Move_SR_Bridge scripts tools tests
+
   build-windows:
+    needs: [verify-version, test]
     runs-on: windows-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -28,8 +74,17 @@ jobs:
 
       - name: Build sr_helper.exe
         run: python scripts/build.py --yes
-        env:
-          PYINSTALLER_QUIET: 1
+
+      # A frozen build can lose a runtime-only import without failing: the
+      # helper imports config.py from its install directory, so PyInstaller
+      # never saw configparser and did not bundle it. `import config` then
+      # raised, the helper fell back to built-in defaults, and config.ini
+      # was ignored by every release -- silently, because speech still
+      # worked. Only the log level and the `Speaking:` trace went missing.
+      # Assert the shipped binary actually reads the config.
+      - name: Smoke-test the frozen helper against a real config.ini
+        shell: bash
+        run: python scripts/smoke_helper.py Move_SR_Bridge/sr_helper.exe
 
       - name: Create distribution zip
         run: |
@@ -37,9 +92,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $staging
           New-Item -ItemType Directory -Force -Path "$staging/Move_SR_Bridge"
           New-Item -ItemType Directory -Force -Path "$staging/scripts"
+          # Every .bat shells out to lib/ResolveInstallDir.ps1 and refuses to
+          # run without it -- it is not optional tooling.
+          New-Item -ItemType Directory -Force -Path "$staging/scripts/lib"
 
-          Copy-Item "${{ github.workspace }}/Move_SR_Bridge/__init__.py","${{ github.workspace }}/Move_SR_Bridge/config.py","${{ github.workspace }}/Move_SR_Bridge/sr_bridge.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.exe","${{ github.workspace }}/Move_SR_Bridge/Tolk.dll","${{ github.workspace }}/Move_SR_Bridge/nvdaControllerClient64.dll" "$staging/Move_SR_Bridge/"
+          Copy-Item "${{ github.workspace }}/Move_SR_Bridge/__init__.py","${{ github.workspace }}/Move_SR_Bridge/config.py","${{ github.workspace }}/Move_SR_Bridge/version.py","${{ github.workspace }}/Move_SR_Bridge/sr_bridge.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.py","${{ github.workspace }}/Move_SR_Bridge/sr_helper.exe","${{ github.workspace }}/Move_SR_Bridge/Tolk.dll","${{ github.workspace }}/Move_SR_Bridge/nvdaControllerClient64.dll" "$staging/Move_SR_Bridge/"
           Copy-Item "${{ github.workspace }}/scripts/install.bat","${{ github.workspace }}/scripts/install_from_source.bat","${{ github.workspace }}/scripts/uninstall.bat","${{ github.workspace }}/scripts/start_helper.bat","${{ github.workspace }}/scripts/build.py" "$staging/scripts/"
+          Copy-Item "${{ github.workspace }}/scripts/lib/ResolveInstallDir.ps1" "$staging/scripts/lib/"
           Copy-Item "${{ github.workspace }}/README.md" "$staging/"
           Copy-Item "${{ github.workspace }}/LICENSE" "$staging/"
 
@@ -54,6 +113,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos:
+    needs: [verify-version, test]
     runs-on: macos-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -74,11 +134,14 @@ jobs:
 
       - name: Build sr_helper_mac (arm64)
         run: |
+          rm -rf build dist
           arch -arm64 "$PY" scripts/build_mac.py --yes
           mv Move_SR_Bridge/sr_helper_mac Move_SR_Bridge/sr_helper_mac_arm64
 
       - name: Build sr_helper_mac (x86_64)
         run: |
+          # Never let the two architectures share a PyInstaller work dir.
+          rm -rf build dist
           arch -x86_64 "$PY" scripts/build_mac.py --yes
           mv Move_SR_Bridge/sr_helper_mac Move_SR_Bridge/sr_helper_mac_x86_64
 
@@ -88,7 +151,24 @@ jobs:
             Move_SR_Bridge/sr_helper_mac_arm64 Move_SR_Bridge/sr_helper_mac_x86_64
           rm Move_SR_Bridge/sr_helper_mac_arm64 Move_SR_Bridge/sr_helper_mac_x86_64
           chmod +x Move_SR_Bridge/sr_helper_mac
-          lipo -archs Move_SR_Bridge/sr_helper_mac
+
+          # Asserted, not just printed. A release that shipped a thin
+          # binary would install fine and then fail to launch on half the
+          # Macs out there, and the only symptom is no speech at all.
+          archs="$(lipo -archs Move_SR_Bridge/sr_helper_mac)"
+          echo "Architectures: ${archs}"
+          for want in arm64 x86_64; do
+            case " ${archs} " in
+              *" ${want} "*) ;;
+              *) echo "::error::sr_helper_mac is missing ${want} (got: ${archs})"; exit 1 ;;
+            esac
+          done
+
+      # See the Windows job: a runtime-only import can vanish from a frozen
+      # build without the build failing.
+      - name: Smoke-test the frozen helper against a real config.ini
+        run: |
+          "$PY" scripts/smoke_helper.py Move_SR_Bridge/sr_helper_mac
 
       - name: Build graphical installer
         run: scripts/installer/mac/build.sh

@@ -89,6 +89,18 @@ def main():
         "PyInstaller",
         "--onefile",
         "--noconsole",
+        # sr_helper.py imports config.py at RUNTIME from its install
+        # directory (sys.path.insert on _script_dir), deliberately, so both
+        # processes read one config module rather than two copies. That
+        # import is invisible to PyInstaller's static analysis, so nothing
+        # config.py needs gets collected -- and the failure is silent:
+        # `import config` raised "No module named 'configparser'", the
+        # helper fell back to built-in defaults, and config.ini was ignored
+        # entirely by every frozen build. Speech still worked, so the only
+        # symptom was `level = DEBUG` doing nothing and the `Speaking:`
+        # lines never appearing.
+        "--hidden-import",
+        "configparser",
         "--name",
         "sr_helper",
         "--distpath",
