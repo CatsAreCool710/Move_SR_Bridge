@@ -329,10 +329,24 @@ differently for speech:
 - **VerticalListContent** -- scrolling menus. The currently selected
   item is announced.
 - **HorizontalListContent** -- name/value pairs (e.g., parameter
-  editing). Announced as "name: value".
+  editing). Announced as "name: value" -- except when the name is the
+  track or scene currently selected in Live, in which case only the
+  value is spoken (see Double-Speech Reduction below).
 - **NotificationContent** -- transient overlays (undo, delete, mode
   changes). The full notification text is announced.
 - **Content** -- general display. All non-empty lines are joined.
+
+### Double-Speech Reduction
+
+Ableton Live has its own native VoiceOver narration for track/scene
+selection (independent of Move_SR_Bridge, and independent of the Move's
+OLED), so changing tracks or scenes can otherwise be announced twice --
+once by Live, once by Move_SR_Bridge. To reduce this, when the Move's
+screen shows a "name: value" pair (e.g. "2-MIDI: No Device") and the
+name matches the track or scene currently selected in Live, only the
+value is spoken ("No Device") -- Live's own narration is expected to
+have just said the name. This is a heuristic based on what's currently
+selected, not a guarantee that Live actually spoke.
 
 ## Troubleshooting
 
