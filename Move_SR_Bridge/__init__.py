@@ -428,25 +428,25 @@ class Move(_OriginalMove):
     )
 
     def _on_selected_track_changed(self):
-        track = self.song().view.selected_track
+        track = self.song.view.selected_track
         name = track.name if track else "(none)"
         logger.debug("Move_SR_Bridge: Live selected track changed -> %s", name)
 
     def _on_selected_scene_changed(self):
-        scene = self.song().view.selected_scene
+        scene = self.song.view.selected_scene
         name = scene.name if scene else "(none)"
         logger.debug("Move_SR_Bridge: Live selected scene changed -> %s", name)
 
     def _on_track_list_changed(self):
         logger.debug(
             "Move_SR_Bridge: Live track list changed (now %d tracks)",
-            len(self.song().tracks),
+            len(self.song.tracks),
         )
 
     def _on_scene_list_changed(self):
         logger.debug(
             "Move_SR_Bridge: Live scene list changed (now %d scenes)",
-            len(self.song().scenes),
+            len(self.song.scenes),
         )
 
     def _install_live_listeners(self):
@@ -456,7 +456,7 @@ class Move(_OriginalMove):
         # breaking normal display updates even though our own hook
         # already installed successfully.
         try:
-            song = self.song()
+            song = self.song
             for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
                 try:
                     owner = getattr(song, owner_attr) if owner_attr else song
@@ -475,7 +475,7 @@ class Move(_OriginalMove):
         # raise, since this runs first thing in disconnect() and would
         # otherwise abort cleanup (super().disconnect(), _stop_helper()).
         try:
-            song = self.song()
+            song = self.song
             for owner_attr, prop, handler_name in self._LIVE_LISTENERS:
                 try:
                     owner = getattr(song, owner_attr) if owner_attr else song
