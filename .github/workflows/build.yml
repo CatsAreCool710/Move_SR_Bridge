@@ -14,11 +14,19 @@ permissions:
 jobs:
   # The log file is this project's primary support artefact, so a build whose
   # reported version is ambiguous makes every future bug report ambiguous too.
-  # Two modes, because a branch push has no tag to compare against:
+  # What actually needs preventing is: an artefact must not claim to be a
+  # released version unless it IS that release.
   #
   #   tag    -> v${version} must equal the tag exactly (the release rule)
-  #   branch -> __version__ must carry a .devN suffix, so a dev build can
-  #             never be mistaken for a release in the log
+  #   branch -> a .devN version is always fine; a release version is fine
+  #             ONLY if a tag for it exists and points at this very commit,
+  #             i.e. this is the release commit itself
+  #
+  # The earlier rule ("a branch must carry .devN, full stop") was a proxy for
+  # this, and the two diverge exactly once per release: the --release commit
+  # lands on dev and turned it red until the next cycle was opened. Asking
+  # the precise question means enforcement arrives when the ambiguity becomes
+  # real -- the moment dev advances past the tag still claiming that version.
   #
   # A dev tag (v1.7.0.dev1) satisfies both. Gate both build jobs on this.
   verify-version:
@@ -26,6 +34,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Tags, and enough history to resolve them, are what distinguish
+          # "this IS the release" from "this merely claims a released
+          # version". Cheap here: ~11MB of history and single-digit tags.
+          fetch-depth: 0
 
       - name: Verify version.py
         run: |
@@ -49,11 +62,23 @@ jobs:
             echo "Version ${version} matches tag ${{ github.ref_name }}"
           else
             case "${version}" in
-              *.dev*) echo "Dev version ${version} on ${{ github.ref_name }}" ;;
+              *.dev*)
+                echo "Dev version ${version} on ${{ github.ref_name }}"
+                ;;
               *)
-                echo "::error::Move_SR_Bridge/version.py says ${version}, but builds off a branch must be dev versions."
-                echo "Run: python scripts/bump_version.py --dev   (or --set X.Y.Z.dev1)"
-                exit 1
+                # A release version on a branch is only honest if this
+                # commit is the one the matching tag points at.
+                tag="v${version}"
+                tagged="$(git rev-parse -q --verify "refs/tags/${tag}^{commit}" || true)"
+                head="$(git rev-parse HEAD)"
+                if [ -n "${tagged}" ] && [ "${tagged}" = "${head}" ]; then
+                  echo "Release commit ${version} on ${{ github.ref_name }} (this is ${tag})"
+                else
+                  echo "::error::Move_SR_Bridge/version.py says ${version}, a release version, but this commit is not ${tag}."
+                  echo "A branch build must not claim a released version it is not. Open the next cycle:"
+                  echo "  python scripts/bump_version.py --set X.Y.Z.dev1"
+                  exit 1
+                fi
                 ;;
             esac
           fi

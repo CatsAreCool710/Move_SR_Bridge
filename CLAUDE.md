@@ -554,12 +554,35 @@ Rewrites **only** the `__version__` line, so the GPL header and docstring surviv
 
 `.github/workflows/build.yml` triggers on **`v*` tags, pushes to `dev`, and `workflow_dispatch`**. The tag-only rule was dropped on purpose: it meant the frozen Windows/macOS artefacts were first exercised at the moment of release, which is the worst possible time to discover a packaging fault. Releases are still tag-driven -- **a branch build publishes nothing**, it only uploads workflow artifacts.
 
-`verify-version` is two-mode, because a branch push has no tag to compare against:
+### The release sequence
+
+```
+# on dev
+python scripts/bump_version.py --release      # 1.7.0.dev3 -> 1.7.0
+git commit -am "Release 1.7.0" && git push
+git checkout main && git merge --ff-only dev && git push origin main
+git tag v1.7.0 && git push origin v1.7.0      # this is what publishes
+
+# open the next cycle, on dev
+python scripts/bump_version.py --set 1.7.1.dev1
+```
+
+The last step is part of the ritual, not an afterthought: until it happens, `dev` sits on a release version.
+
+### What `verify-version` actually asserts
+
+The rule is **an artefact must not claim to be a released version unless it *is* that release**:
 
 - **tag** → `v${version}` must equal the tag exactly;
-- **branch** → `__version__` must carry a `.devN` suffix, so a dev build can never be mistaken for a release in the log -- the same argument the tag rule already makes, extended one step.
+- **branch** → a `.devN` version always passes; a release version passes **only** if a tag for it exists and points at this very commit.
 
-A dev tag (`v1.7.0.dev1`) satisfies both and publishes as a **prerelease** (`prerelease: ${{ contains(github.ref_name, '.dev') }}`).
+The branch arm was originally just "must carry `.devN`", which is a *proxy* for the rule above. The two diverge exactly once per release: the `--release` commit lands on `dev`, is a perfectly honest 1.7.0, and turned `dev` red until the next cycle was opened. A permanently red branch is one people learn to ignore, which defeats having CI on it.
+
+Asking the precise question means enforcement arrives when the ambiguity becomes real -- the moment `dev` advances past the tag still claiming that version. It is no weaker elsewhere: a release version that was never tagged (`1.8.0` on a branch) still fails, because it is claiming a release that does not exist.
+
+This needs `fetch-depth: 0` on that job's checkout, to have the tags at all. Cheap here: ~11MB of history, single-digit tags.
+
+A dev tag (`v1.7.0.dev1`) satisfies both arms and publishes as a **prerelease** (`prerelease: ${{ contains(github.ref_name, '.dev') }}`).
 
 `test` (unit suite + `compileall`) runs on **Python 3.11** to match Live's interpreter, so 3.12+ syntax cannot slip through, and gates both platform builds.
 
