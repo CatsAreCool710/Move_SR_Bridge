@@ -2,6 +2,52 @@
 
 All notable changes to Move-SR-Bridge are recorded here.
 
+## 1.7.0
+
+Two things the device shows only with light or a glyph are now spoken, and an
+audit of the screen interception fixed three defects it turned up.
+
+Everything here follows one rule: **speak only what a sighted user already
+gets from the device**. Announcing a menu item's position ("3 of 12") was
+designed and then cut, because Live never draws a total -- a sighted user
+cannot see it either.
+
+### Added
+
+- **Submenu marker.** Live draws `>` beside a menu item that opens a list and
+  `-` beside one that fires immediately; the selected item now reads as
+  "Brightness, submenu" or plain "Standalone". This matters: `Standalone`
+  switches the Move out of Live's control the instant you press the wheel.
+- **Step-button toggles.** A short tap on one of the 16 buttons along the
+  bottom row announces "Step 5 on" or "Step 5 off", read back from the
+  button's own LED rather than inferred. Holding a step still enters velocity
+  editing and announces that instead -- the two never overlap. A tap's
+  announcement replaces the velocity overlay rather than queueing behind it.
+  The 32 pads are deliberately not announced.
+- **`[speech] step_toggles`** (default `true`) turns step announcements off.
+  An existing `config.ini` is never rewritten, so add the section by hand.
+
+### Fixed
+
+- **Notifications no longer carry a line break into speech or braille.** Move
+  embeds a real newline in its notification text and splits it when drawing,
+  so "Notes deleted" was being sent as two lines joined by a raw newline.
+- **dB values now match Live's own rounding** (one decimal). The master-volume
+  announcement could report more precision than Live displays anywhere.
+- **A second display line starting lowercase is no longer mistaken for a
+  wrapped sentence.** A lowercase track or device name read as "1-Audio bass"
+  instead of "1-Audio, bass". Only one screen on the device genuinely wraps a
+  sentence, and it is now named rather than guessed at.
+
+### Development
+
+- Work now lands on a **`dev` branch**, versioned `1.7.0.dev1` and so on, and
+  CI builds it. Previously the frozen Windows and macOS artefacts were first
+  exercised at the moment of release. Branch builds publish nothing; they
+  upload artifacts. Releases are still driven by a `v*` tag.
+- **`scripts/bump_version.py`** manages the version string
+  (`--show`/`--set`/`--dev`/`--release`).
+
 ## 1.6.0
 
 The install location moves to the Ableton User Library on both platforms,

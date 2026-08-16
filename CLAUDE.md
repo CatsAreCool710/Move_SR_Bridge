@@ -36,22 +36,30 @@ delay_ms = 300      # Ms to wait after last update before speaking
 
 [logging]
 level = INFO        # DEBUG, INFO, WARNING, or ERROR
+
+[speech]
+step_toggles = true # Announce the step buttons as they are tapped
 ```
 
 - `enabled`: When true, speech is delayed until no display updates occur for `delay_ms` milliseconds. Prevents rapid-fire speech during encoder turns.
 - `delay_ms`: Lower values feel more responsive; higher values reduce chatter. Set to 0 to effectively disable.
 - `level`: Verbosity written to `~/.move_sr_bridge/Move_SR_Bridge.log`, read by both the remote script and `sr_helper.py` from the same file. Diagnostic-only messages (every text sent to be spoken; Live-side track/scene selection changes) log at DEBUG and are hidden at the default INFO level. Set to DEBUG when diagnosing double-speech (see Diagnostics below).
+- `step_toggles`: Announce the 16 step-sequencer buttons on tap (`"Step 5 on"` / `"Step 5 off"`), read from the button's own LED. See "Reading the lights".
+
+**The submenu marker deliberately has no key, and that asymmetry is a decision, not an oversight.** It only enriches an announcement that already happens, by one word, on a screen the user is deliberately navigating. `step_toggles` gets a key because it is a new *class* of announcement on the device's busiest control. Do not "harmonise" the two.
 
 ### A bad config.ini must never cost the user the control surface
 
 `__init__.py` reads this file at **module import**, inside Live, so anything that escapes makes Live skip the script and Move_SR_Bridge stops appearing in the Control Surface dropdown -- with no clue as to why. The whole read is therefore wrapped in `except Exception`, and both processes report the outcome as `_config_status`.
 
-Two ways in, neither of which `config.py`'s own `except configparser.Error` catches, and both of which shipped:
+Three ways in, none of which `config.py`'s own `except configparser.Error` catches, and all of which shipped:
 
 - **`UnicodeDecodeError` is not a `configparser.Error`.** It is a `ValueError`. Saving `config.ini` from Notepad in its default ANSI encoding with any accented character in it -- in a comment is enough -- makes `read(encoding="utf-8")` raise it straight through the handler.
 - **`getattr(logging, name)` finds any module attribute.** `level = BASIC_FORMAT` returns a format *string*, and `setLevel()` raises `ValueError` on it. So the check is `isinstance(level, int)`, not a `None` test. `NOTSET` is rejected too: `setLevel(0)` means "inherit", which silently drops everything below WARNING -- the same invisible outcome by a different route.
 
-`tests/test_config.py` covers both, each in its own interpreter, since the config is read once at import and cached.
+- **`NoSectionError` on a key added after the user's `config.ini` was written.** `config.py` writes `_DEFAULT_CONFIG` **only when the file does not exist**, so everyone upgrading keeps a file with no `[speech]` section. `_DEFAULTS`/`read_dict` covers that in practice, but a bare `_cfg.getboolean("speech", ...)` raises `NoSectionError`, which is a `configparser.Error` and **not** a `ValueError` -- so it escapes the `except ValueError` beside it, escapes `_install_display_hook`, is caught by `_try_install_hook`, and costs the user the whole display hook. **Rule: every config read uses `fallback=`.** The existing `[debounce]` reads still do not and would break the same way if their section went missing; retrofitting them is a separate change.
+
+`tests/test_config.py` covers the first two, each in its own interpreter, since the config is read once at import and cached. `tests/test_display_hook.py` covers the third by installing the hook against a config with no `[speech]` section at all.
 
 ## File Layout
 
@@ -70,6 +78,8 @@ Move_SR_Bridge/          The MIDI Remote Script package (deployed to Live)
 scripts/
   build.py               PyInstaller build script (Windows)
   build_mac.py           PyInstaller build script (macOS)
+  bump_version.py        Reads/bumps version.py -- the only writer of the
+                          version string.  --show/--set/--dev/--release.
   smoke_helper.py        Runs a BUILT helper against a real config.ini;
                           both release build jobs and release_mac.sh
                           gate on it. Asserts [frozen] and the version
@@ -219,6 +229,13 @@ interception, and can overlap/double up with it. To diagnose this:
      `empty`. Suppression is most of what the hook does, so without this
      "Move_SR_Bridge ignored that screen" and "Move_SR_Bridge never saw
      that screen" were indistinguishable.
+   - `step Step 5 on` -- a step-button toggle. It does **not** also produce
+     a `screen [...]` line: it never went through `_consider_announcing`,
+     because a step toggle is not a display update. Same trap as the
+     `dialog` line below, and recorded for the same reason. The install
+     line also reports the outcome:
+     `Display hook installed (debounce=..., step_toggles=on|disabled by
+     config|no note editor|failed)`.
    - `Speaking: ...` -- every text the helper was asked to speak.
    - `dialog announced, frontmost app is ...` / `dialog suppressed, Live is
      frontmost ...` -- the helper's decision for a `cmd: "dialog"`. Note a
@@ -236,6 +253,10 @@ interception, and can overlap/double up with it. To diagnose this:
 
 There is no automatic correlation or source tagging across these logs --
 compare timestamps by eye.
+
+`_log_failure` site strings, so they are greppable: `Display hook`,
+`Announcement`, `Step hook install`, `Step release wrapper`,
+`Step notes listener`, `Step toggle announcement`, `Step hook teardown`.
 
 **Check `Log level:` first.** The helper logs
 `Log level: DEBUG (config: ok) [frozen]` at startup. If it says
@@ -289,7 +310,15 @@ Three normalisation steps sit between Live's OLED text and speech, all derived f
 - **Other PUA codepoints** are stripped (`_is_private_use`). They are always icon-font glyphs with no spoken form. Scope is the BMP block `U+E000`–`U+F8FF` only, not the plane 15/16 supplementary areas -- Move's icon font lives in the BMP block, and widening it has no known case behind it.
 - **`_ABBREVIATIONS`** expands display-width abbreviations that are unreadable aloud. Currently one entry (`Autmtn.` → `Automation`) -- the only genuine case across all 46 stock Move modules. Do **not** add conventional audio shorthand (`Freq`, `LFO`, `Env`): expanding those would diverge from what Live's own UI calls the same control.
 
-`_join_lines()` joins with `", "` except when the next line starts lowercase, which means Live wrapped one sentence across lines (`"Press wheel to"` / `"shut down"`).
+**`_spoken()` collapses whitespace unconditionally, and that is load-bearing.** Move builds its `NotificationView` with `supports_new_line=True`, so `NotificationView.render` deliberately does *not* flatten the `\n` in a notification template -- `'Notes\ndeleted'` arrives as a **single `lines` entry containing a real newline**, which Live's `break_line` splits into two drawn rows at draw time. The newline is intrinsic to the vocabulary, not an edge case: `display_util.on_off_to_title_case` exists purely to rewrite `'\non'` → `'\nOn'`. Collapsing only when the automation glyph happened to be present -- which shipped -- sent a raw newline to the screen reader and the braille display on **every** notification. It does not crash (AppleScript accepts a literal newline in a `-e` string), which is why it went unnoticed. Note the notification branch's `" ".join(text_lines)` is a **no-op on Move**: notifications are always one element, and `_spoken()` is what actually flattens them.
+
+**`_join_lines()` names the one real continuation instead of guessing it.** It joins with `", "` unless the pair is in `_CONTINUATION_PAIRS`, which holds exactly one entry: `("Press wheel to", "shut down")`. Reading every `Content(...)` construction in `Move/display.py` shows that is the *only* sentence Live authors across two lines -- everything else that arrives as two lines is a name/value pair or a list. The previous rule (next line starts lowercase) served that one screen while mis-joining every genuinely distinct field starting lowercase, so a lowercase track, device, bank or menu name read as `"1-Audio bass"` instead of `"1-Audio, bass"`.
+
+**`_CONTINUATION_PAIRS` and `_URGENT_TEXTS` are coupled**: the pair must join to exactly the urgent string, or the shutdown prompt silently stops bypassing the debounce. `tests/test_format_content.py` asserts the join result is a member of `_URGENT_TEXTS` rather than leaving it to a comment.
+
+**`_parameter_value_text()` mirrors Live's own rounding.** `display_util.parameter_value_string` is `str(parameter)` plus `'{} dB'.format(round(float(...), 1))` for dB values, so bare `str()` announced more precision than Live ever draws for that parameter anywhere.
+
+**The submenu marker.** Live sets `MenuItem.cursor_char` to `'>'` when an item has sub-items and `'-'` otherwise (`__post_init__`), and `_do_display` passes it to `draw_vertical_list(lines, list_cursor_char, list_index)` -- so it is genuinely drawn beside the cursor, and announcing it is parity rather than embellishment. It describes the **selected row only** (Live sends one char per content), so it is appended on the selected-item arm and nowhere else -- never on the whole-list fallback, which fires precisely when the selected row is unknown. Every Move menu is a real mix: Settings has `Brightness` (`>`, opening the LED/pad brightness levels) beside `Standalone` (`-`, which fires `switch_to_standalone` immediately). `>` covers both a nested list and a `simple_content` value picker, deliberately -- Live draws one glyph for both.
 
 **`list_index` indexes the position-aligned line list, never the filtered one.** `_format_content()` builds two views: `aligned_lines` keeps one entry per entry of `content.lines` (empties preserved), and `text_lines` drops the empties for whole-screen reads. Live's `list_index` refers to `content.lines`, so indexing the filtered list shifted every entry after a blank or icon-only line and announced the **wrong menu item** -- confidently, which is worse than silence for a screen-reader user.
 
@@ -377,6 +406,40 @@ Frontmost detection uses **`lsappinfo front`** plus `lsappinfo info -only bundle
 
 `_is_urgent()` still bypasses the debounce and cancels anything queued, for the shutdown prompt and dialogs.
 
+## Reading the lights
+
+The first feature that announces something Live never rendered as text.
+
+**Two different controls, and only one is in scope.** `Step_Buttons` is 16 buttons on MIDI notes **16–31**, the bottom row. `Pads` is a separate element built from `create_matrix_identifiers(68, 100, 8, flip_rows=True)` -- 32 pads on notes **68–99**, 4×8, deliberately out of scope. The script models the step buttons as a 4×4 matrix internally, but `step_buttons_raw[n]` is the *n*th button left to right and `note = 16 + n`, so numbering them 1–16 along the row matches what the user's hand is on.
+
+**The light is the source of truth.** `NoteEditorComponent._get_color_for_step(index, visible_steps)` returns the skin name driving the LED, as a pure read (`_visible_steps()` builds a fresh dict, `filter_notes` filters a list; no Live API call, no mutation):
+
+| Name | We say |
+|---|---|
+| `NoteEditor.StepFilled` | on |
+| `NoteEditor.StepMuted` | on -- muted counts as on, deliberately |
+| `NoteEditor.StepEmpty` | off |
+| `StepDisabled`, `NoClip` | nothing |
+| `StepTied`, `StepPartiallyTied` | nothing -- produced **only** by `show_duration_of_active_steps`, the hold-to-inspect gesture |
+| `Playhead` | nothing -- and only when `StepColorManager.clip` is unset; the real playhead LED is drawn by `PlayheadComponent` (`playhead_notes = range(16, 32)`), which bypasses this function |
+
+`_STEP_LIGHT_ON`/`_STEP_LIGHT_OFF` are **two frozensets, not one plus a default**. With a default, a skin name Ableton adds later would be announced as a confident "off".
+
+**The staleness rule, which dictates the whole shape.** `_get_color_for_step` reads `self._clip_notes`, a cache refreshed by `__on_clip_notes_changed` (`@listens('notes')` on the clip). So the light must be sampled **before** the toggle and read again **on the `clip_notes` event** -- never synchronously after the original, where `_clip_notes` has not been refreshed and the answer is the *old* state, confidently backwards.
+
+**The tap gates it; the light reports it.** Diffing all 16 lights on every `clip_notes` would also fire for Live-UI edits, undo and every note captured while recording -- far too chatty. So `_on_release_step` is wrapped to arm a record (index + before-light), and the `clip_notes` listener reads the light again and announces only if it changed.
+
+Consequences, each the reason for a line in `_install_step_hooks`:
+
+- **The diff is self-validating**, so *none* of `_on_release_step`'s short-circuits is mirrored and `_add_note_in_step`/`_delete_notes_in_step` need no wrapper. A velocity edit, a duration hold, or a tap with no clip leaves the light unchanged and says nothing.
+- **There is deliberately no `finally`** clearing the record. Adding one is the obvious tidy-up and it silently disables the feature wherever Live fires the LOM listener *after* `_on_release_step` returns. A test covers the deferred case.
+- **The record is consumed before announcing**, so a re-entrant `clip_notes` cannot announce twice.
+- **The original call is the last statement and unguarded**, so nothing of ours can stop Live editing the clip, and its exception propagates untouched.
+
+**Restore discipline.** Instance attribute only, **never the class** -- a class patch outlives every instance and every disconnect. Unwrap with `delattr`, **never `setattr(original)`**: the original is a *bound method* holding a strong reference to the editor, so writing it into the instance `__dict__` is not a restore -- it shadows the class method permanently and makes any later class-level patch invisible. That difference is behaviourally invisible, so the test asserts on `vars(note_editor)`. The listener is removed **first**, being the one thing that could still speak.
+
+**Tap and hold are mutually exclusive by Live's own gesture split**, which is why no mode flag is needed. `_on_pad_pressed` pushes a `RelativeInternalParameter(name='Velocity')` into `Active_Parameter`, so a press already announces `"Velocity: N"` through the display hook; a short tap reaches `_on_release_step` via `released_immediately` and preempts it with `_speak_now`, while a long hold goes to `released_delayed` with `can_add_or_remove=False`, toggles nothing, and keeps the velocity overlay.
+
 ## Researching Live's Behaviour
 
 Live ships the Move remote scripts as `.pyc` only (Python 3.11, magic `0x0da7`). To read them:
@@ -391,16 +454,34 @@ f.read(16); dis.dis(marshal.load(f))"
 
 This is how the automation glyph, the notification taxonomy, the dialog signal, and the fact that `content.lines` is *untruncated* (Live calls `_break_line` at draw time) were all established.
 
+Findings worth not re-deriving, each of which cost an hour:
+
+- **`draw_vertical_list(lines, list_cursor_char, list_index)`** takes no total, which is what settles the list-position question above.
+- **`MenuCursor.position`** returns only 0/1/2 -- a row within the visible window, not an absolute index.
+- **`with_loop_overview` is `cls(**k)`**, so `NotificationContent` survives it. Had it downcast to `Content`, every notification would have been misclassified as a main screen and the whole overlay taxonomy would be wrong.
+- **`Display.display(content)`** is fed only by `render()` → `Optional[Content]`, so the `isinstance(message, str)` branch in `_do_display` is for other framework callers and can never reach our hook. `None` can, and is handled.
+- **`component_map['Step_Sequence'].note_editor`** is the reachable chain, resolved by `Move.setup()` during construction. `ComponentMap.__getitem__` constructs the factory and writes it back, which is why `dict.get` matters here even more than for `Active_Parameter`.
+- **`StepTied`/`StepPartiallyTied`** are produced *only* by `show_duration_of_active_steps`.
+- **`NotificationView.render`** preserves `\n` when `supports_new_line=True`, which Move sets.
+- Move raises a notification for nearly every discrete state toggle (`Notifications.Track.mute/solo/arm`, `Transport.*`, `Notes.*`, `Device.*`, `Clip.*`, `Scene.*`, `Sequence.current_bar`), which is why so little else needs new code.
+
 **Disassembly rather than decompilation is the only option, and that is not a workaround.** Live 12's Python 3.11 introduced zero-cost exception tables and the adaptive interpreter, which broke every Python decompiler -- clean full decompilation of Live 12 `.pyc` is not possible with current tools. Reading bytecode with `dis` is what the wider Live scripting community does too (see [structure-void's unofficial docs](https://midiremotescripts.structure-void.com/)). For cross-checking API shape, gluon mirrors the extracted sources at [`AbletonLive12_MIDIRemoteScripts`](https://github.com/gluon/AbletonLive12_MIDIRemoteScripts) -- useful for the `ableton.v2`/`v3` framework, though the `Move` package itself is what matters here and is best read directly.
 
 ## Known Inaccessible Surfaces
 
-Deliberately not addressed -- surfacing them would be new features, not fixes:
+**The rule that decides what belongs here: speak only what a sighted user already gets from the device.** No new features, no invented information, no new gestures. Two things were designed against this and then **cut** for failing it, so do not re-propose them:
 
-- **Loop overview** (`LoopOverviewData`: playhead, loop bounds, positions) -- graphical only, wrapped onto nearly every view via `with_loop_overview()`.
-- **Level meters** (`left_meter`/`right_meter`).
-- **Pad/LED state** (`colors.py`, `skin.py`, `step_color_manager.py`) -- clip playing/stopped/recording, step on/off, drum-pad content. The largest inaccessible surface on the device; never touches the display pipeline.
-- **List position** ("3 of 12") -- `Content` carries only a ≤3-item visible window plus an index into it; the total is not derivable without reaching into the menu component.
+- **List position ("3 of 12")** -- rejected. `_do_display` calls `draw_vertical_list(content.lines, content.list_cursor_char, content.list_index)`, and there is **no total in that call**. Live never draws one, so a sighted user cannot see it either. (It *is* reachable, via `component_map['Menu_Modes']._menu_cursor._current_item.{index,visible_items}` -- and `Content.list_index` is only ever 0/1/2, a row within the visible window, per `MenuCursor.position`. Reachable but not parity.)
+- **Menu name on entry** -- rejected. `menu.list_content` builds `lines` from the visible items only; no title is ever drawn for a menu or submenu.
+
+Still not addressed:
+
+- **Loop overview** (`LoopOverviewData`: playhead, loop bounds, positions) -- graphical only, wrapped onto nearly every view via `with_loop_overview()`. Continuous, so translating it would need a query gesture.
+- **Level meters** (`left_meter`/`right_meter`) -- same; set only on the master-volume screen.
+- **The 32 pads** (`Session.*` clip state, `DrumGroup.PadFilled` content, `Instrument.NoteScale`) -- LED-only, genuinely inaccessible, and **the largest remaining gap on the device**. Deliberately out of scope by the owner's decision, not because it is hard.
+- **Step state the user has not just touched** -- the light is read on a tap, so Live-UI edits, undo and recording stay silent by design. See "Reading the lights".
+
+**Almost everything else is already covered by notifications.** Move raises an OLED notification for track mute/solo/arm/select, transport metronome/loop/tap-tempo, note delete/nudge/transpose, device, clip, scene, full-velocity, note-repeat and bar/page changes -- and the bridge already announces those. That is why the honest answer to "what else can be made accessible?" is "very little".
 
 **`Content.value` is a partial gap.** It is a normalised 0–1 float driving the bar graphic, and for almost every screen the human-readable value is also in `lines` -- but not always. `parameter_view`'s master-track branch renders
 
@@ -424,9 +505,40 @@ The bar *position* on multi-line parameter screens is still not surfaced, and ne
 
 ## Release Process
 
-1. Bump `__version__` in `Move_SR_Bridge/version.py` -- the single source, logged at startup by both processes.
-2. Commit, then tag `v<__version__>` and push the tag.
-3. `.github/workflows/build.yml` runs **only on `v*` tags**. This is deliberate: nothing runs on push/PR, so a broken commit is not caught until release time. Two jobs gate both platform builds -- `verify-version` (tag must match `version.py`) and `test` (unit suite + `compileall`, run on **Python 3.11** to match Live's interpreter, so 3.12+ syntax cannot slip through). Adding these did not add a trigger; the tag-only rule still holds.
+### Version scheme
+
+**PEP 440 dot form: `MAJOR.MINOR.PATCH[.devN]`** -- `1.7.0`, `1.7.0.dev1`. Chosen over `1.7.0-dev1` because `1.7.0.dev1` sorts *before* `1.7.0` under PEP 440, which is what it means: a pre-release of 1.7.0, not something after it. `version.py` is Python and should follow Python's convention; git tags take dots without complaint.
+
+The canonical pattern lives in `scripts/bump_version.py` as `VERSION_PATTERN` and is duplicated in `build.yml`. **`tests/test_version.py` asserts the two are character-for-character identical** -- if they drift, CI accepts a version the tooling rejects (or the reverse) and it only surfaces at release time. Leading zeros in `devN` are rejected so `dev1` and `dev01` cannot both exist and disagree about ordering.
+
+### `scripts/bump_version.py`
+
+Rewrites **only** the `__version__` line, so the GPL header and docstring survive -- a rewrite that regenerated the file would be a licensing defect, not a cosmetic one.
+
+| Command | Effect |
+|---|---|
+| `--show` | print the current version and its tag |
+| `--set 1.7.0.dev1` | set exactly, validated |
+| `--dev` | `1.7.0.dev1` → `1.7.0.dev2`; **errors** on a release version |
+| `--release` | `1.7.0.dev3` → `1.7.0`; errors on a release version |
+
+`--dev` refusing to guess is deliberate: deriving "the next dev" from `1.6.0` means deciding whether the next release is a patch, minor or major, and a tool that guesses that will eventually guess wrong silently.
+
+### Branches and CI
+
+1. Day-to-day work lands on **`dev`**, versioned `.devN`.
+2. To release: `--release`, commit, tag `v<__version__>`, push the tag.
+
+`.github/workflows/build.yml` triggers on **`v*` tags, pushes to `dev`, and `workflow_dispatch`**. The tag-only rule was dropped on purpose: it meant the frozen Windows/macOS artefacts were first exercised at the moment of release, which is the worst possible time to discover a packaging fault. Releases are still tag-driven -- **a branch build publishes nothing**, it only uploads workflow artifacts.
+
+`verify-version` is two-mode, because a branch push has no tag to compare against:
+
+- **tag** → `v${version}` must equal the tag exactly;
+- **branch** → `__version__` must carry a `.devN` suffix, so a dev build can never be mistaken for a release in the log -- the same argument the tag rule already makes, extended one step.
+
+A dev tag (`v1.7.0.dev1`) satisfies both and publishes as a **prerelease** (`prerelease: ${{ contains(github.ref_name, '.dev') }}`).
+
+`test` (unit suite + `compileall`) runs on **Python 3.11** to match Live's interpreter, so 3.12+ syntax cannot slip through, and gates both platform builds.
 
 `scripts/release_mac.sh` builds locally; it reads the version from `version.py` and prints the matching tag. It uses `$PYTHON` (default `python3`) -- do not reintroduce a hardcoded venv, since building on a different interpreter than CI's 3.13 silently produces a different artefact.
 

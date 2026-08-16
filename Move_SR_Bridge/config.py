@@ -28,6 +28,8 @@ Sections:
         delay_ms  = <int>        (default: 300)
     [logging]   -- Logging verbosity for Move_SR_Bridge.log
         level     = DEBUG|INFO|WARNING|ERROR   (default: INFO)
+    [speech]    -- What gets announced beyond the OLED text
+        step_toggles = true|false   (default: true)
 """
 
 import configparser
@@ -65,8 +67,18 @@ delay_ms = 300
 # to DEBUG when diagnosing double-speech or other issues.
 # Valid values: DEBUG, INFO, WARNING, ERROR
 level = INFO
+
+[speech]
+# Announce the step-sequencer buttons along the bottom row.  A short tap
+# toggles a step, and its state is read back from the button's own light
+# ("Step 5 on" / "Step 5 off").  Holding a step still enters velocity
+# editing and announces that instead -- the two never overlap.
+# Set to false to silence step announcements; nothing else changes.
+step_toggles = true
 """
 
+# Must stay in step with __init__.py's _DEFAULT_SETTINGS, which is the
+# fallback used only when this module cannot be imported at all.
 _DEFAULTS = {
     "debounce": {
         "enabled": "true",
@@ -74,6 +86,9 @@ _DEFAULTS = {
     },
     "logging": {
         "level": "INFO",
+    },
+    "speech": {
+        "step_toggles": "true",
     },
 }
 

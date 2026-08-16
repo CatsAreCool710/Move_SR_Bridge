@@ -518,11 +518,33 @@ your own Mac's architecture only.
 
 | Action | Output |
 |---|---|
-| Shift + Step menus | Selected menu item |
+| Shift + Step menus | Selected menu item, and "submenu" when it opens one |
+| Step buttons (tap) | "Step 5 on" / "Step 5 off" |
 | Encoder turns (parameters) | Parameter name and value |
 | Notifications (undo, etc.) | Notification text |
 | Script load | "Move connected" |
 | Script unload / Live close | "Move disconnected" |
+
+**Menus.** Live draws a `>` beside a menu item that opens a list and a `-`
+beside one that acts immediately, so that marker is now spoken. In Settings,
+"Brightness" opens the LED and pad brightness levels and reads as
+"Brightness, submenu"; "Standalone" switches the device out of Live's control
+the moment you press the wheel, and reads with no marker.
+
+**Step buttons.** A short tap on one of the 16 buttons along the bottom row
+toggles that step, and its new state is read back from the button's own light.
+The number is 1-based within the page you are on. Holding a step instead
+enters velocity editing and announces that, so the two never overlap. The 32
+pads are not announced.
+
+To turn step announcements off, add this to
+`~/.move_sr_bridge/config.ini` -- by hand, since an existing config file is
+never rewritten:
+
+```ini
+[speech]
+step_toggles = false
+```
 
 Both speech and braille output are supported on Windows (braille
 availability depends on the active screen reader). On macOS, speech is

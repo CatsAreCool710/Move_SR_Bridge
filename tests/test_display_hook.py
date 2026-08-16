@@ -23,6 +23,7 @@ the debounce path itself is covered in test_helper_lifecycle.py.
 import configparser
 import os
 import sys
+import threading
 import types
 import unittest
 
@@ -769,6 +770,224 @@ class UrgentBypassTest(unittest.TestCase):
             ["Press wheel to shut down"],
             "the queued announcement must be dropped, not spoken after",
         )
+
+
+class StepToggleWiringTest(unittest.TestCase):
+    """The step hooks reaching the display hook's closure.
+
+    Every test in test_step_toggle.py passes against a feature that is
+    never installed; these are the ones that prove it is wired up.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def _install(self, config=None, editor=None, speak=None):
+        self.spoken = []
+        self.brailled = []
+        self.rendered = []
+        display = types.SimpleNamespace(display=self.rendered.append)
+        self.editor = editor if editor is not None else stubs.FakeNoteEditor(
+            lights={4: "NoteEditor.StepEmpty"},
+            on_release=self._toggle_to("NoteEditor.StepFilled"),
+        )
+        surface = stubs.step_sequence_surface(
+            display=display, note_editor=self.editor
+        )
+        fake_bridge = types.SimpleNamespace(
+            speak=speak if speak is not None else self.spoken.append,
+            braille=self.brailled.append,
+            dialog=[].append,
+        )
+        cfg = configparser.ConfigParser()
+        cfg.read_dict(config if config is not None else {
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+            "speech": {"step_toggles": "true"},
+        })
+        patchers = [
+            mock.patch.object(self.m, "sr_bridge", fake_bridge, create=True),
+            mock.patch.dict(
+                sys.modules, {"Move_SR_Bridge.sr_bridge": fake_bridge}
+            ),
+            mock.patch.object(self.m, "_cfg", cfg),
+            mock.patch.object(self.m, "_dialog_is_open", lambda: False),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+        self.display = display
+        teardown = self.m._install_display_hook(surface)
+        del self.spoken[:]
+        del self.brailled[:]
+        del self.rendered[:]
+        return teardown
+
+    @staticmethod
+    def _toggle_to(value):
+        def original(editor, step, can_add_or_remove):
+            editor.lights[step.y * editor.width + step.x] = value
+            editor.fire_clip_notes()
+
+        return original
+
+    def test_step_toggle_is_announced_end_to_end(self):
+        # Catches forgetting to call _install_step_hooks at all.
+        teardown = self._install()
+        self.assertIsNotNone(teardown)
+        self.addCleanup(teardown)
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(self.spoken, ["Step 5 on"])
+        self.assertEqual(
+            self.brailled, self.spoken,
+            "braille must carry the same text as speech",
+        )
+
+    def test_disabled_wraps_nothing_at_all(self):
+        # A gate applied at announce time would still hold the closure --
+        # and through it the control surface -- alive all session, so this
+        # is asserted on vars(), not only on silence.
+        teardown = self._install(config={
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+            "speech": {"step_toggles": "false"},
+        })
+        self.addCleanup(teardown)
+        self.assertNotIn("_on_release_step", vars(self.editor))
+        self.assertEqual(self.editor._listeners, [])
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(self.spoken, [])
+
+    def test_missing_speech_section_still_installs_the_hook(self):
+        # The single most likely way this change breaks real users: every
+        # config.ini written before 1.7.0 lacks [speech], and config.py only
+        # writes the file when it does not exist. Without fallback=,
+        # NoSectionError escapes _install_display_hook and the user loses
+        # the display hook entirely.
+        teardown = self._install(config={
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+        })
+        self.assertIsNotNone(teardown, "hook must install without [speech]")
+        self.addCleanup(teardown)
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(self.spoken, ["Step 5 on"])
+
+    def test_garbage_value_falls_back_to_enabled(self):
+        teardown = self._install(config={
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+            "speech": {"step_toggles": "banana"},
+        })
+        self.assertIsNotNone(teardown)
+        self.addCleanup(teardown)
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(self.spoken, ["Step 5 on"])
+
+    def test_absent_step_sequence_does_not_take_the_hook_down(self):
+        self.spoken = []
+        self.brailled = []
+        rendered = []
+        display = types.SimpleNamespace(display=rendered.append)
+        surface = types.SimpleNamespace(display=display, song=None)
+        fake_bridge = types.SimpleNamespace(
+            speak=self.spoken.append,
+            braille=self.brailled.append,
+            dialog=[].append,
+        )
+        cfg = configparser.ConfigParser()
+        cfg.read_dict({
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+        })
+        patchers = [
+            mock.patch.object(self.m, "sr_bridge", fake_bridge, create=True),
+            mock.patch.dict(
+                sys.modules, {"Move_SR_Bridge.sr_bridge": fake_bridge}
+            ),
+            mock.patch.object(self.m, "_cfg", cfg),
+            mock.patch.object(self.m, "_dialog_is_open", lambda: False),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+        teardown = self.m._install_display_hook(surface)
+        self.assertIsNotNone(teardown)
+        self.addCleanup(teardown)
+        del self.spoken[:]
+        display.display(stubs.Content(lines=["Still working"]))
+        self.assertEqual(self.spoken, ["Still working"])
+
+    def test_teardown_unwraps_the_step_hooks(self):
+        teardown = self._install()
+        teardown()
+        self.assertNotIn("_on_release_step", vars(self.editor))
+        self.assertEqual(self.editor._listeners, [])
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(self.spoken, [])
+
+    def test_failing_step_unwrap_still_restores_the_display(self):
+        # _install_step_hooks' own unwrap is internally guarded and will not
+        # raise, so patch it to return one that does. This tests _teardown's
+        # guard: putting the step unwrap outside a try/except, or after the
+        # display restore, would leave Live's display method patched for the
+        # rest of the session.
+        exploding = mock.Mock(side_effect=RuntimeError("boom"))
+        with mock.patch.object(
+            self.m, "_install_step_hooks", return_value=exploding
+        ):
+            teardown = self._install()
+        original = self.display.display
+        teardown()
+        self.assertTrue(exploding.called, "the unwrap should have been tried")
+        self.assertNotEqual(
+            self.display.display,
+            original,
+            "the display restore must not be skipped by a failing unwrap",
+        )
+        self.assertEqual(self.display.display, self.rendered.append)
+
+    def test_toggle_preempts_a_queued_display_announcement(self):
+        # Two halves, and both are needed. Half one alone still passes if
+        # _speak_now is replaced by a bare sr_bridge.speak -- and the user
+        # then hears "Step 5 on" followed by "Velocity: 100" 40ms later,
+        # which is the exact defect this feature exists to prevent.
+        second = threading.Event()
+        seen = []
+
+        def speak(text):
+            seen.append(text)
+            if len(seen) > 1:
+                second.set()
+
+        teardown = self._install(
+            config={
+                "debounce": {"enabled": "true", "delay_ms": "40"},
+                "logging": {"level": "INFO"},
+                "speech": {"step_toggles": "true"},
+            },
+            speak=speak,
+        )
+        self.addCleanup(teardown)
+        del seen[:]
+
+        self.display.display(
+            stubs.HorizontalListContent(lines=["Velocity", "100"])
+        )
+        self.assertEqual(seen, [], "the overlay should be queued, not spoken")
+
+        self.editor._on_release_step(stubs.FakeStep((1, 0)), True)
+        self.assertEqual(seen, ["Step 5 on"], "the toggle must bypass the debounce")
+
+        self.assertFalse(
+            second.wait(0.5),
+            "the queued 'Velocity' announcement must be cancelled, not "
+            "spoken 40ms later",
+        )
+        self.assertEqual(seen, ["Step 5 on"])
 
 
 if __name__ == "__main__":

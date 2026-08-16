@@ -324,5 +324,167 @@ class _FakeLive(object):
         return self._count
 
 
+class SubmenuMarkerTest(unittest.TestCase):
+    """Live draws '>' beside an item that opens a submenu, '-' for a leaf."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def _vertical(self, lines, index, cursor_char=""):
+        return self.m._format_content(
+            stubs.VerticalListContent(
+                lines=lines, list_index=index, list_cursor_char=cursor_char
+            )
+        )
+
+    def test_submenu_item_is_marked(self):
+        # Settings' Brightness opens the LED/pad brightness levels.
+        result = self._vertical(["Standalone", "Brightness"], 1, ">")
+        self.assertEqual(result.text, "Brightness, submenu")
+
+    def test_leaf_item_is_not_marked(self):
+        # Standalone fires switch_to_standalone the moment you press it --
+        # treating any non-empty char as a submenu would mark every leaf.
+        result = self._vertical(["Standalone", "Brightness"], 0, "-")
+        self.assertEqual(result.text, "Standalone")
+        self.assertNotIn("submenu", result.text)
+
+    def test_empty_cursor_char_is_not_marked(self):
+        result = self._vertical(["Standalone", "Brightness"], 0, "")
+        self.assertEqual(result.text, "Standalone")
+
+    def test_missing_attribute_does_not_raise(self):
+        # Content/Horizontal/Notification carry no list_cursor_char, and a
+        # bare attribute read would raise into the display hook's catch-all
+        # on every non-list screen.
+        self.assertEqual(self.m._submenu_marker(stubs.Content(lines=["x"])), "")
+        self.assertEqual(self.m._submenu_marker(object()), "")
+
+    def test_whole_list_fallback_is_not_marked(self):
+        # We reach the fallback precisely when the selected row is unknown,
+        # and the char describes that row alone.
+        result = self._vertical(["Standalone", "Brightness"], None, ">")
+        self.assertEqual(result.text, "Standalone, Brightness")
+        self.assertNotIn("submenu", result.text)
+
+    def test_marker_is_confined_to_vertical_lists(self):
+        horizontal = stubs.HorizontalListContent(lines=["Tempo", "120"])
+        horizontal.list_cursor_char = ">"
+        self.assertNotIn("submenu", self.m._format_content(horizontal).text)
+
+        notification = stubs.NotificationContent(lines=["Undo"])
+        notification.list_cursor_char = ">"
+        self.assertNotIn("submenu", self.m._format_content(notification).text)
+
+    def test_marker_composes_with_the_automation_glyph(self):
+        result = self._vertical([self.m._AUTOMATION_CHAR + "Cutoff"], 0, ">")
+        self.assertEqual(result.text, "automated Cutoff, submenu")
+
+
+class NewlineFlatteningTest(unittest.TestCase):
+    """Move's notifications carry a real newline inside one `lines` entry."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def test_notification_newline_is_flattened(self):
+        # NotificationView is built with supports_new_line=True, so the \n
+        # in 'Notes\ndeleted' is preserved all the way to us and Live's
+        # break_line splits it into two drawn rows. Collapsing only when the
+        # automation glyph was present -- which is what shipped -- let this
+        # reach the screen reader and the braille display verbatim.
+        result = self.m._format_content(
+            stubs.NotificationContent(lines=["Notes\ndeleted"])
+        )
+        self.assertEqual(result.text, "Notes deleted")
+        self.assertNotIn("\n", result.text)
+
+    def test_newline_and_automation_glyph_together(self):
+        result = self.m._format_content(
+            stubs.NotificationContent(
+                lines=[self.m._AUTOMATION_CHAR + "Cutoff\nchanged"]
+            )
+        )
+        self.assertEqual(result.text, "automated Cutoff changed")
+
+    def test_spoken_collapses_all_whitespace(self):
+        # A .replace("\n", " ") special-case would leave the tab.
+        self.assertEqual(self.m._spoken("a\tb  c\nd"), "a b c d")
+
+
+class ParameterValueTextTest(unittest.TestCase):
+    """Mirror Live's own parameter_value_string rounding."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    class _Param(object):
+        def __init__(self, text):
+            self._text = text
+
+        def __str__(self):
+            return self._text
+
+    def test_db_is_rounded_to_one_decimal(self):
+        # display_util.parameter_value_string rounds to 1dp before drawing,
+        # so anything longer is precision the user cannot check on screen.
+        self.assertEqual(
+            self.m._parameter_value_text(self._Param("-6.0234 dB")), "-6.0 dB"
+        )
+        self.assertEqual(
+            self.m._parameter_value_text(self._Param("-6 dB")), "-6.0 dB"
+        )
+
+    def test_non_db_values_pass_through(self):
+        for text in ("Off", "800 Hz", "127"):
+            self.assertEqual(
+                self.m._parameter_value_text(self._Param(text)), text
+            )
+
+    def test_unparseable_db_passes_through(self):
+        # Live also renders things like "-inf dB"; a bare float() with no
+        # guard would raise and lose the value entirely.
+        self.assertEqual(
+            self.m._parameter_value_text(self._Param("a lot of dB")),
+            "a lot of dB",
+        )
+
+    def test_empty_is_none(self):
+        self.assertIsNone(self.m._parameter_value_text(self._Param("   ")))
+
+
+class JoinLinesTest(unittest.TestCase):
+    """The one authored sentence fragment, named rather than guessed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def test_shutdown_prompt_joins_into_the_urgent_text(self):
+        # The coupling: the pair must join to exactly a member of
+        # _URGENT_TEXTS, or the shutdown prompt silently stops bypassing
+        # the debounce. Change either constant alone and this goes red.
+        joined = self.m._join_lines(["Press wheel to", "shut down"])
+        self.assertEqual(joined, "Press wheel to shut down")
+        self.assertIn(joined, self.m._URGENT_TEXTS)
+
+    def test_lowercase_field_gets_a_comma(self):
+        # The false positive the old heuristic produced: a lowercase track,
+        # device, bank or menu name read as a wrapped sentence.
+        self.assertEqual(
+            self.m._join_lines(["1-Audio", "bass"]), "1-Audio, bass"
+        )
+
+    def test_every_pair_is_considered(self):
+        # A `previous` that is never advanced only ever tests the first pair.
+        self.assertEqual(self.m._join_lines(["a", "b", "c"]), "a, b, c")
+
+    def test_single_line_is_unchanged(self):
+        self.assertEqual(self.m._join_lines(["only"]), "only")
+
+
 if __name__ == "__main__":
     unittest.main()

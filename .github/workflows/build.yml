@@ -4,35 +4,66 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - 'dev'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # The log file is this project's primary support artefact, so a release
-  # whose reported version disagrees with its tag would make every future
-  # bug report ambiguous. Gate both build jobs on the two matching.
+  # The log file is this project's primary support artefact, so a build whose
+  # reported version is ambiguous makes every future bug report ambiguous too.
+  # Two modes, because a branch push has no tag to compare against:
+  #
+  #   tag    -> v${version} must equal the tag exactly (the release rule)
+  #   branch -> __version__ must carry a .devN suffix, so a dev build can
+  #             never be mistaken for a release in the log
+  #
+  # A dev tag (v1.7.0.dev1) satisfies both. Gate both build jobs on this.
   verify-version:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Verify version.py matches the tag
+      - name: Verify version.py
         run: |
           version="$(python3 -c 'import sys; sys.path.insert(0, "Move_SR_Bridge"); import version; print(version.__version__)')"
-          if [ "v${version}" != "${{ github.ref_name }}" ]; then
-            echo "::error::Move_SR_Bridge/version.py says ${version} (tag v${version}) but this tag is ${{ github.ref_name }}."
-            echo "Bump __version__ in Move_SR_Bridge/version.py, or retag."
+          # Kept character-for-character in step with VERSION_PATTERN in
+          # scripts/bump_version.py; tests/test_version.py asserts they match,
+          # because a drift means CI accepts a version the tooling rejects.
+          pattern='^[0-9]+\.[0-9]+\.[0-9]+(\.dev[1-9][0-9]*)?$'
+          if ! printf '%s' "${version}" | grep -Eq "${pattern}"; then
+            echo "::error::Move_SR_Bridge/version.py says ${version}, which is not a valid version."
+            echo "Expected MAJOR.MINOR.PATCH optionally followed by .devN, e.g. 1.7.0 or 1.7.0.dev1."
             exit 1
           fi
-          echo "Version ${version} matches tag ${{ github.ref_name }}"
+
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            if [ "v${version}" != "${{ github.ref_name }}" ]; then
+              echo "::error::Move_SR_Bridge/version.py says ${version} (tag v${version}) but this tag is ${{ github.ref_name }}."
+              echo "Bump __version__ in Move_SR_Bridge/version.py, or retag."
+              exit 1
+            fi
+            echo "Version ${version} matches tag ${{ github.ref_name }}"
+          else
+            case "${version}" in
+              *.dev*) echo "Dev version ${version} on ${{ github.ref_name }}" ;;
+              *)
+                echo "::error::Move_SR_Bridge/version.py says ${version}, but builds off a branch must be dev versions."
+                echo "Run: python scripts/bump_version.py --dev   (or --set X.Y.Z.dev1)"
+                exit 1
+                ;;
+            esac
+          fi
 
   # The suite runs without Live, hardware, or any dependency, so it costs a
   # few seconds and catches the regressions that used to surface only after
-  # a release. Note this adds no new trigger: the workflow is still tag-only
-  # by design, so nothing runs on push or PR -- the tests are a release gate,
-  # not a per-commit check.
+  # a release. It runs on the dev branch as well as on tags: the whole point
+  # of the dev branch is that the frozen artefacts get exercised before a
+  # release tag, not at the moment of one. Releases are still tag-driven --
+  # a branch build publishes nothing, it only uploads artifacts.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -104,10 +135,23 @@ jobs:
 
           Compress-Archive -Path "$staging/*" -DestinationPath "${{ github.workspace }}/Move-SR-Bridge-Windows.zip"
 
+      # Always available, tag or branch, so a dev push still yields a build
+      # someone can download and install.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Move-SR-Bridge-Windows
+          path: Move-SR-Bridge-Windows.zip
+
+      # Only a tag can create a release -- a branch build has nothing to
+      # attach one to. A .dev tag publishes as a prerelease so it never sits
+      # alongside real releases.
       - name: Upload Release Asset
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '.dev') }}
           files: Move-SR-Bridge-Windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -176,10 +220,19 @@ jobs:
       - name: Create distribution zip
         run: ditto -c -k --sequesterRsrc --keepParent "Install Move-SR-Bridge.app" Move-SR-Bridge-macOS.zip
 
+      # See the Windows job.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Move-SR-Bridge-macOS
+          path: Move-SR-Bridge-macOS.zip
+
       - name: Upload Release Asset
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '.dev') }}
           files: Move-SR-Bridge-macOS.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

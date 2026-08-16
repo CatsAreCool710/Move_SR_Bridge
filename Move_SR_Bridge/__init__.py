@@ -103,9 +103,12 @@ logger.info("Move_SR_Bridge: Script loading (version %s)...", __version__)
 # --------------------------------------------------------------------------
 import configparser as _configparser
 
+# Must stay in step with config.py's _DEFAULTS -- an installer-side copy
+# drifting out of sync (missing a whole section) has shipped here before.
 _DEFAULT_SETTINGS = {
     "debounce": {"enabled": "true", "delay_ms": "300"},
     "logging": {"level": "INFO"},
+    "speech": {"step_toggles": "true"},
 }
 
 
@@ -208,6 +211,16 @@ logger.info("Move_SR_Bridge: Original Move script imported successfully")
 # Content types for type-aware announcements
 # --------------------------------------------------------------------------
 _content_types = {}
+# "content" is registered but deliberately never read by _format_content:
+# plain Content is what the final fallback handles, and it needs no
+# isinstance test to do so.  It earns its place twice over anyway --
+# it feeds the startup diagnostic below, which is how a failed
+# display_util import is recognised, and tests/test_format_content.py's
+# setUp asserts all four keys are present.  That assertion is what stops
+# the formatting tests going vacuous: with an empty _content_types every
+# isinstance falls through to the fallback and the tests pass while
+# testing nothing.  Do not delete it as dead, and do not "complete" it
+# with a branch.
 for _name, _import in [
     ("vertical", "VerticalListContent"),
     ("horizontal", "HorizontalListContent"),
@@ -590,26 +603,91 @@ def _clean_line(line):
 
 
 def _spoken(text):
-    """Final pass: turn the automation glyph into a word."""
+    """Final pass: turn the automation glyph into a word, then flatten.
+
+    The whitespace collapse is unconditional, and that matters.  Move
+    builds its `NotificationView` with `supports_new_line=True`, so
+    `NotificationView.render` deliberately does NOT flatten the newline in
+    a notification template -- `'Notes\\ndeleted'` arrives as a single
+    `lines` entry containing a real newline, which Live's `break_line`
+    splits into two drawn rows at draw time.  Collapsing only when the
+    automation glyph happened to be present (which is what this used to
+    do) let that newline through to the screen reader and the braille
+    display on every notification.  The sighted user sees one two-row
+    phrase, so "Notes deleted" is also the parity-correct reading.
+    """
     if _AUTOMATION_CHAR in text:
         text = text.replace(_AUTOMATION_CHAR, _AUTOMATION_SPOKEN + " ")
-        text = " ".join(text.split())
-    return text
+    return " ".join(text.split())
+
+
+# The only multi-line sentence Live authors anywhere in the Move view
+# tree, established by reading every Content(...) construction in
+# Move/display.py against 12.4.5b11: main_view's shutdown prompt.  Every
+# other multi-line content is a distinct name/value pair or a list, and
+# wants a comma.
+#
+# This MUST join to a member of _URGENT_TEXTS -- the shutdown prompt only
+# bypasses the debounce because the joined string matches there.  The two
+# constants are coupled, and tests/test_format_content.py asserts it.
+_CONTINUATION_PAIRS = frozenset([
+    ("Press wheel to", "shut down"),
+])
 
 
 def _join_lines(lines):
-    """Join display lines, keeping wrapped sentences readable.
+    """Join display lines, keeping the one wrapped sentence readable.
 
     Lines are usually distinct fields ("Cutoff", "800 Hz"), where a comma
-    is right.  But Live also wraps a single sentence across lines
-    ("Press wheel to" / "shut down"), and a comma there inserts a
-    spurious pause mid-sentence.  A continuation line starts lowercase,
-    so join those with a space.
+    is right.  Live also authors exactly one sentence split across two
+    lines ("Press wheel to" / "shut down"), where a comma inserts a
+    spurious pause mid-sentence.
+
+    This used to be guessed from the next line starting lowercase.  That
+    served the one screen above while mis-joining every genuinely distinct
+    field that happens to start lowercase -- a lowercase track, device,
+    bank or menu-item name read as "1-Audio bass" instead of
+    "1-Audio, bass".  Naming the single real case removes the guess.
+
+    If Live ever rewords the prompt the result is a spurious comma, which
+    is cosmetic -- the same trade _URGENT_TEXTS already accepts.
     """
-    joined = lines[0]
+    joined = previous = lines[0]
     for line in lines[1:]:
-        joined += (" " if line[:1].islower() else ", ") + line
+        separator = " " if (previous, line) in _CONTINUATION_PAIRS else ", "
+        joined += separator + line
+        previous = line
     return joined
+
+
+# Live marks a menu item that opens a submenu with '>' and a leaf with
+# '-' (Move/menu.py: MenuItem.cursor_char defaults to '-', and
+# __post_init__ sets '>' whenever the item has sub-items).  That char is
+# passed straight to the OLED --
+# DisplayElement._do_display -> draw_vertical_list(lines, list_cursor_char,
+# list_index) -- so it is genuinely on the glass beside the cursor, and
+# announcing it is parity rather than embellishment.
+#
+# It distinguishes "the wheel opens a list you can browse" from "the wheel
+# does it right now", and Settings' `Standalone` (which switches the
+# device out of Live's control) is a leaf.  Both plain ASCII, no Private
+# Use Area involvement.
+_SUBMENU_CURSOR_CHAR = ">"
+_SUBMENU_SPOKEN = "submenu"
+
+
+def _submenu_marker(content):
+    """"submenu" when Live drew '>' beside the selected item, else "".
+
+    getattr with a default because only VerticalListContent carries this
+    attribute -- Content, HorizontalListContent and NotificationContent do
+    not, and this runs on every display update.
+    """
+    return (
+        _SUBMENU_SPOKEN
+        if getattr(content, "list_cursor_char", None) == _SUBMENU_CURSOR_CHAR
+        else ""
+    )
 
 
 # What _format_content() reports about one display update.
@@ -694,9 +772,17 @@ def _format_content(content, active_parameter=None):
             and 0 <= list_index < len(aligned_lines)
             and aligned_lines[list_index]
         ):
-            return _Announcement(
-                _spoken(aligned_lines[list_index]), None, None, False
-            )
+            text = _spoken(aligned_lines[list_index])
+            # `list_cursor_char` describes the SELECTED row only -- Live
+            # sends one char for the whole content -- so it belongs here
+            # and nowhere else.
+            marker = _submenu_marker(content)
+            if marker:
+                text += ", " + marker
+            return _Announcement(text, None, None, False)
+        # No marker on the whole-list fallback: we reach it precisely when
+        # we could not identify which row is selected, and the char
+        # describes that row alone.
         return _Announcement(_spoken(_join_lines(text_lines)), None, None, False)
 
     # Horizontal list (name + value)
@@ -722,6 +808,11 @@ def _format_content(content, active_parameter=None):
     if "notification" in _content_types and isinstance(
         content, _content_types["notification"]
     ):
+        # This join is a no-op on Move: notifications always arrive as a
+        # single `lines` entry, and their multi-line-ness lives INSIDE it
+        # as a real newline ('Notes\ndeleted') which Live's break_line
+        # splits at draw time.  _spoken() is what actually flattens it.
+        # Kept for any producer that does pass several lines.
         return _Announcement(_spoken(" ".join(text_lines)), None, None, True)
 
     return _Announcement(_spoken(_join_lines(text_lines)), None, None, False)
@@ -770,15 +861,306 @@ def _parameter_value_text(parameter):
     """Human-readable value of a device parameter, or None.
 
     Live's own `parameter_view` renders this with
-    `parameter_value_string()`, which is not importable from here; `str()`
-    on a DeviceParameter gives the same display string, and is what Live's
-    own Velocity branch of `parameter_view` uses.
+    `parameter_value_string()`, which is not importable from here.  That
+    function is, verbatim from Move/display_util.py:
+
+        value_string = str(parameter)
+        if ' dB' in value_string:
+            return '{} dB'.format(round(float(value_string.replace(' dB', '')), 1))
+        return value_string
+
+    so it is `str()` plus one decimal of rounding on dB values.  Mirror it
+    rather than using bare `str()`: otherwise the master-volume recovery
+    announces more precision than Live ever draws for that parameter
+    anywhere, which is a number the user cannot check against the screen.
     """
     try:
         text = str(parameter).strip()
-        return text or None
     except Exception:
         return None
+    if not text:
+        return None
+    if " dB" in text:
+        try:
+            text = "{} dB".format(round(float(text.replace(" dB", "")), 1))
+        except (TypeError, ValueError):
+            # Not a plain number (Live also renders "-inf dB" and similar).
+            # Say whatever str() gave us rather than nothing.
+            pass
+    return text
+
+
+# --------------------------------------------------------------------------
+# Step-sequencer buttons: reading the lights
+# --------------------------------------------------------------------------
+# The 16 buttons along the bottom row (Step_Buttons, MIDI notes 16-31) show
+# whether each step holds a note, through their LEDs, and nothing else on
+# the device reports it -- there is no notification for a single step being
+# added or removed, and main_view never mentions step state.  The 32 pads
+# (Pads, notes 68-99, a separate 4x8 element) are deliberately out of scope.
+#
+# Live's own NoteEditorComponent._get_color_for_step() returns the skin name
+# that drives the LED, so it is the source of truth.  Anything outside these
+# two sets -- StepDisabled, NoClip, the transient StepTied/StepPartiallyTied
+# from the hold-to-inspect gesture, Playhead, or a name Ableton adds later --
+# means we do not know, and we say nothing.
+#
+# Two frozensets rather than "off is anything that is not on": with a
+# default, a future skin name would be announced as a confident "off".
+_STEP_LIGHT_ON = frozenset([
+    "NoteEditor.StepFilled",
+    # A muted step still holds a note.  Reported as "on" deliberately --
+    # StepMuted is a distinct LED, but on/off is the chosen vocabulary.
+    "NoteEditor.StepMuted",
+])
+_STEP_LIGHT_OFF = frozenset([
+    "NoteEditor.StepEmpty",
+])
+
+_STEP_SEQUENCE_COMPONENT = "Step_Sequence"
+_STEP_RELEASE_METHOD = "_on_release_step"
+_STEP_HOOK_MARKER = "_move_sr_bridge_step_hooks"
+# Step_Buttons is a 4x4 matrix in the script and a row of 16 on the device;
+# either way the flat index is what the user's hand is on.  Only a fallback:
+# NoteEditorComponent.width is a property and is read live.
+_DEFAULT_STEP_WIDTH = 4
+
+
+def _step_toggle_text(index, is_on):
+    """"Step 5 on" / "Step 5 off".
+
+    1-based, and within the current page: the 16 buttons always show one
+    page, so no paginator read is needed and none is made.
+    """
+    return "Step %d %s" % (index + 1, "on" if is_on else "off")
+
+
+def _step_index(step, note_editor):
+    """Flat 0-based index of a step button, or None if it cannot be trusted.
+
+    `StepButtonControl.State` derives `x = coordinate[1]` and
+    `y = coordinate[0]`, and Move's own code computes the flat index as
+    `step.y * 4 + step.x` -- row-major.  `width` comes from the live
+    property (`matrix.width or DEFAULT_WIDTH`) rather than a constant, but
+    a bare `note_editor.width` would raise straight into the caller's
+    catch-all and kill the feature silently for the session, so it falls
+    back instead.
+
+    Returns None rather than a guess whenever anything looks wrong:
+    announcing "Step 137 on" is worse than saying nothing.
+    """
+    x = getattr(step, "x", None)
+    y = getattr(step, "y", None)
+    if not isinstance(x, int) or not isinstance(y, int):
+        return None
+    width = getattr(note_editor, "width", None)
+    if not isinstance(width, int) or width <= 0:
+        width = _DEFAULT_STEP_WIDTH
+    index = y * width + x
+    if index < 0:
+        return None
+    count = getattr(note_editor, "step_count", None)
+    if isinstance(count, int) and count > 0 and index >= count:
+        return None
+    return index
+
+
+def _step_light(note_editor, index):
+    """True (lit), False (unlit) or None (unknown) for one step button.
+
+    Reads exactly what Live uses to colour the LED.  Both calls are pure
+    reads with no side effects -- `_visible_steps()` builds a fresh dict
+    and `filter_notes` filters a list; no Live API call, no mutation --
+    so this is cheap enough to call on a button press and must not be
+    cached.
+
+    Note the value is only as fresh as `note_editor._clip_notes`, which is
+    a cache refreshed asynchronously by the editor's own `notes` listener.
+    See _install_step_hooks for why that dictates when this is called.
+    """
+    try:
+        name = note_editor._get_color_for_step(index, note_editor._visible_steps())
+    except Exception:
+        return None
+    if name in _STEP_LIGHT_ON:
+        return True
+    if name in _STEP_LIGHT_OFF:
+        return False
+    return None
+
+
+def _get_note_editor(control_surface):
+    """Live's note editor component, or None.
+
+    Same defensive shape as _get_active_parameter, and the same rule about
+    `dict.get` over the subscript -- but here it is not merely hygiene.
+    `Step_Sequence` genuinely is one of ComponentMap's lazily-constructed
+    keys, and `ComponentMap.__getitem__` constructs the component and
+    writes it back into the dict.  Subscripting would build the entire step
+    sequencer as a side effect of our lookup.
+
+    In practice `Move.setup()` already resolves
+    `component_map['Step_Sequence'].note_editor` during construction, well
+    before on_identified(), so the instance is there.  If that ever stops
+    being true, `dict.get` returns the factory, which has no `note_editor`,
+    and the feature degrades to off with no side effect on Live.
+    """
+    try:
+        component_map = getattr(control_surface, "component_map", None)
+        if component_map is None:
+            return None
+        if isinstance(component_map, dict):
+            component = dict.get(component_map, _STEP_SEQUENCE_COMPONENT)
+        else:
+            component = component_map[_STEP_SEQUENCE_COMPONENT]
+        if component is None:
+            return None
+        return getattr(component, "note_editor", None)
+    except Exception:
+        return None
+
+
+def _install_step_hooks(note_editor, announce):
+    """Announce step toggles by reading the button's light.
+
+    Returns a zero-argument callable that undoes everything installed, or
+    None if nothing was installed.
+
+    The tap decides WHEN and WHICH step; the light decides WHAT state to
+    report.  Reading the lights alone would mean diffing all 16 on every
+    `clip_notes`, which also fires for Live-UI edits, undo and every note
+    captured while recording -- far too chatty.  Inferring the state from
+    which internal method ran would never consult the light at all.
+
+    The two reads must straddle Live's cache refresh:
+
+        tap release
+          |- prologue: remember the step and its light BEFORE the toggle
+          |- original _on_release_step(...)   -> clip modified
+        ...Live fires the clip's `notes` listener, sync or deferred...
+          |- __on_clip_notes_changed refreshes _clip_notes, then notifies
+             |- our listener: read the light again and diff
+
+    Consequences of that shape, each load-bearing:
+
+    * The diff is self-validating.  A gesture that toggles nothing (a
+      velocity edit, a duration hold, no clip) leaves the light unchanged
+      and says nothing -- so none of _on_release_step's short-circuits is
+      mirrored, and _add_note_in_step/_delete_notes_in_step need no wrapper.
+    * Coalescing is free.  _add_note_in_step fires once per pitch, so a
+      chord fires `clip_notes` once per pitch; consuming the record BEFORE
+      announcing means the first event wins.
+    * It works whether Live's LOM listener is synchronous or deferred.  The
+      prologue arms the record before the original runs, so a listener
+      firing inside clip.add_new_notes() already sees it; and there is
+      deliberately NO `finally` clearing it, so a deferred listener finds
+      it too.  Adding one is the obvious tidy-up and it silently disables
+      the feature wherever Live defers.
+    * Never read the light synchronously after the original: `_clip_notes`
+      has not been refreshed yet, so the answer would be the old state --
+      confidently backwards.
+    """
+    if note_editor is None:
+        return None
+
+    if getattr(note_editor, _STEP_HOOK_MARKER, None) is not None:
+        logger.warning(
+            "Move_SR_Bridge: Step hooks already installed on this note "
+            "editor, not installing again"
+        )
+        return None
+
+    original_release = getattr(note_editor, _STEP_RELEASE_METHOD, None)
+    add_listener = getattr(note_editor, "add_clip_notes_listener", None)
+    remove_listener = getattr(note_editor, "remove_clip_notes_listener", None)
+    has_listener = getattr(note_editor, "clip_notes_has_listener", None)
+    # Resolve everything before mutating anything.  A partial install is
+    # the worst outcome: a wrapper left on the instance with no unwrap
+    # callable able to remove it.
+    if not callable(original_release) or not callable(add_listener):
+        logger.warning(
+            "Move_SR_Bridge: Note editor is missing %s or "
+            "add_clip_notes_listener, step toggles not announced",
+            _STEP_RELEASE_METHOD,
+        )
+        return None
+
+    pending = [None]
+
+    def _wrapped_on_release_step(step, can_add_or_remove=False):
+        try:
+            index = _step_index(step, note_editor)
+            if index is None:
+                pending[0] = None
+            else:
+                before = _step_light(note_editor, index)
+                # An unreadable light gives nothing to compare against, so
+                # do not arm -- otherwise the first readable frame would
+                # announce a change nobody observed.
+                pending[0] = (
+                    None if before is None
+                    else {"index": index, "before": before}
+                )
+        except Exception as e:
+            _log_failure("Step release wrapper", e)
+            pending[0] = None
+        # Last statement, and unguarded: nothing of ours can skip Live's
+        # own work, its exception propagates untouched, and its return
+        # value passes through.
+        return original_release(step, can_add_or_remove)
+
+    def _on_clip_notes():
+        try:
+            record = pending[0]
+            if record is None:
+                # No armed gesture: recording, undo, or an edit made in
+                # Live's own UI.  Not ours to announce.
+                return
+            pending[0] = None  # consume exactly once, before announcing
+            after = _step_light(note_editor, record["index"])
+            # `after is not None` first: None != True is True, so without
+            # it an unreadable light would be announced as "off".
+            if after is not None and after != record["before"]:
+                announce(record["index"], after)
+        except Exception as e:
+            _log_failure("Step notes listener", e)
+
+    def _unwrap():
+        # Listener first -- it is the one that can still speak.
+        try:
+            if not callable(has_listener) or has_listener(_on_clip_notes):
+                if callable(remove_listener):
+                    remove_listener(_on_clip_notes)
+        except Exception as e:
+            _log_failure("Step hook teardown", e)
+        try:
+            if getattr(note_editor, _STEP_RELEASE_METHOD, None) is (
+                _wrapped_on_release_step
+            ):
+                # delattr, never setattr(original): `original_release` is a
+                # BOUND method holding a strong reference to note_editor.
+                # Writing it into the instance __dict__ is not a restore --
+                # it shadows the class method permanently and makes any
+                # later class-level patch invisible.  (And never patch the
+                # class itself: that would outlive every instance.)
+                delattr(note_editor, _STEP_RELEASE_METHOD)
+            else:
+                logger.warning(
+                    "Move_SR_Bridge: %s was replaced by something else, "
+                    "leaving it alone",
+                    _STEP_RELEASE_METHOD,
+                )
+        except Exception as e:
+            _log_failure("Step hook teardown", e)
+        try:
+            delattr(note_editor, _STEP_HOOK_MARKER)
+        except AttributeError:
+            pass
+
+    setattr(note_editor, _STEP_RELEASE_METHOD, _wrapped_on_release_step)
+    add_listener(_on_clip_notes)
+    setattr(note_editor, _STEP_HOOK_MARKER, _unwrap)
+    return _unwrap
 
 
 def _dialog_is_open():
@@ -950,6 +1332,24 @@ def _install_display_hook(control_surface):
             "using default (300)"
         )
         debounce_delay = 0.3
+    # fallback= is load-bearing, and is a rule for every future key here.
+    # config.py only writes _DEFAULT_CONFIG when the file does not exist, so
+    # everyone upgrading keeps a config.ini with no [speech] section.
+    # _DEFAULTS/read_dict covers that in practice, but NoSectionError is a
+    # configparser.Error, NOT a ValueError -- a bare read would escape this
+    # handler, escape _install_display_hook, be caught by _try_install_hook
+    # and cost the user the display hook entirely.
+    try:
+        step_toggles_enabled = _cfg.getboolean(
+            "speech", "step_toggles", fallback=True
+        )
+    except ValueError:
+        logger.warning(
+            "Move_SR_Bridge: Invalid 'step_toggles' value in config.ini, "
+            "using default (true)"
+        )
+        step_toggles_enabled = True
+    _step_unwrap = [None]
     _debounce_timer = [None]
     _pending_text = [None]
     # Bumped every time an announcement is queued or dropped. A timer only
@@ -1035,6 +1435,31 @@ def _install_display_hook(control_surface):
         bugs and looked identical from the log.
         """
         logger.debug("Move_SR_Bridge: screen [%s] %s", decision, text)
+
+    def _announce_step(index, is_on):
+        """Speak one step-button toggle, preempting anything queued.
+
+        Deliberately not _trace(): that stream is documented as every
+        display update the hook saw, and a step toggle is not one -- it
+        gets its own line so the two are never confused in the log.
+
+        Deliberately does not touch last_announced[0] either: a step
+        toggle is not a screen, and feeding it into screen change
+        detection could suppress a genuine later screen.
+
+        _speak_now cancels the pending announcement, which is the point.
+        Pressing a step button already pushes a "Velocity" parameter
+        overlay through the display hook, so a quick tap would otherwise
+        say "Step 5 on" and then "Velocity: 100" a moment later.  Its
+        _cancel_pending() does not join, which matters here: this runs on
+        Live's MIDI callback thread.
+        """
+        try:
+            text = _step_toggle_text(index, is_on)
+            logger.debug("Move_SR_Bridge: step %s", text)
+            _speak_now(text)
+        except Exception as e:
+            _log_failure("Step toggle announcement", e)
 
     def _consider_announcing(content):
         active_parameter = _get_active_parameter(control_surface)
@@ -1204,7 +1629,19 @@ def _install_display_hook(control_surface):
 
         Restore before cancelling, so no frame arriving mid-teardown can
         queue anything behind us.
+
+        The step hooks come off first: their `clip_notes` listener is the
+        one remaining thing that could still speak, and it is guarded so a
+        failure there cannot skip the display restore below, which is the
+        part that absolutely must happen.
         """
+        if _step_unwrap[0] is not None:
+            try:
+                _step_unwrap[0]()
+            except Exception as e:
+                _log_failure("Step hook teardown", e)
+            _step_unwrap[0] = None
+
         if display.display is _intercepted_display:
             display.display = original_display_method
         else:
@@ -1217,11 +1654,35 @@ def _install_display_hook(control_surface):
             )
         _cancel_pending(wait=True)
 
+    # The display hook lands first and unconditionally: nothing below may
+    # cost the user the thing that already works.
     display.display = _intercepted_display
+
+    # Gated at install time, not announce time.  A disabled feature must
+    # wrap nothing at all -- wrapping and then checking would still hold
+    # this closure, and through it the control surface, alive all session.
+    step_toggles_status = "disabled by config"
+    if step_toggles_enabled:
+        try:
+            _step_unwrap[0] = _install_step_hooks(
+                _get_note_editor(control_surface), _announce_step
+            )
+            step_toggles_status = (
+                "on" if _step_unwrap[0] is not None else "no note editor"
+            )
+        except Exception as e:
+            _log_failure("Step hook install", e)
+            step_toggles_status = "failed"
+
+    # Report what actually happened, not what was configured: this line is
+    # the project's primary support artefact and must not describe work it
+    # skipped.
     logger.info(
-        "Move_SR_Bridge: Display hook installed (debounce=%s, delay=%dms)",
+        "Move_SR_Bridge: Display hook installed (debounce=%s, delay=%dms, "
+        "step_toggles=%s)",
         debounce_enabled,
         int(debounce_delay * 1000),
+        step_toggles_status,
     )
 
     sr_bridge.speak("Move connected")
