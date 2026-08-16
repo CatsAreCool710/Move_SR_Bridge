@@ -269,8 +269,9 @@ There is no automatic correlation or source tagging across these logs --
 compare timestamps by eye.
 
 `_log_failure` site strings, so they are greppable: `Display hook`,
-`Announcement`, `Step hook install`, `Step release wrapper`,
-`Step notes listener`, `Step toggle announcement`, `Step hook teardown`.
+`Announcement`, `Hook install greeting`, `Step hook install`,
+`Step release wrapper`, `Step notes listener`, `Step toggle announcement`,
+`Step hook teardown`.
 
 **Check `Log level:` first.** The helper logs
 `Log level: DEBUG (config: ok) [frozen]` at startup. If it says
@@ -449,6 +450,14 @@ Consequences, each the reason for a line in `_install_step_hooks`:
 - **There is deliberately no `finally`** clearing the record. Adding one is the obvious tidy-up and it silently disables the feature wherever Live fires the LOM listener *after* `_on_release_step` returns. A test covers the deferred case.
 - **The record is consumed before announcing**, so a re-entrant `clip_notes` cannot announce twice.
 - **The original call is the last statement and unguarded**, so nothing of ours can stop Live editing the clip, and its exception propagates untouched.
+
+**Install is all-or-nothing, and the caller must always get its teardown.** Three holes here were found by audit *after* the feature worked, and all three are silent:
+
+- `_install_display_hook` patches `display.display` and installs the step hooks, then logs and speaks the greeting. `_try_install_hook` records the teardown **only if the function returns it**, so anything raising after those patches -- a broken log handler, an unexpected `sr_bridge` failure -- left both installed with nothing able to remove them, and the next `on_identified()` installed a second copy on top. Everything past the patches is now inside a `try`.
+- Resolving the method lookups up front is **not** the same as the mutations being atomic: if `add_clip_notes_listener` raised after the wrapper was on the instance, the caller got no unwrap callable and the wrapper was orphaned for the session. The wrapper is now rolled back on a failed subscription.
+- `remove_clip_notes_listener` is required alongside `add_`, not just the one about to be called. Subscribing with no way to unsubscribe installs a listener that outlives `disconnect()`.
+
+`_unwrap` is also **idempotent**, and not for tidiness: a second call would find the wrapper already gone and log `was replaced by something else` -- the documented signal for "another script is wrapping the note editor" -- sending someone hunting a conflict that does not exist.
 
 **Restore discipline.** Instance attribute only, **never the class** -- a class patch outlives every instance and every disconnect. Unwrap with `delattr`, **never `setattr(original)`**: the original is a *bound method* holding a strong reference to the editor, so writing it into the instance `__dict__` is not a restore -- it shadows the class method permanently and makes any later class-level patch invisible. That difference is behaviourally invisible, so the test asserts on `vars(note_editor)`. The listener is removed **first**, being the one thing that could still speak.
 

@@ -38,6 +38,13 @@ cannot see it either.
   wrapped sentence.** A lowercase track or device name read as "1-Audio bass"
   instead of "1-Audio, bass". Only one screen on the device genuinely wraps a
   sentence, and it is now named rather than guessed at.
+- **A failure while starting up can no longer strand the hooks.** If
+  anything went wrong after the display hook was installed -- a log write
+  failing, the helper socket dropping at the wrong moment -- the shutdown
+  path lost track of it. It stayed installed with no way to remove it, and
+  reconnecting the Move layered a second copy on top. Related: a failed
+  subscription now rolls itself back rather than leaving a half-installed
+  hook behind.
 - **No config.ini can cost you the control surface.** Every setting is now
   read through one guarded helper, so a missing section, a missing option or
   an unparseable value falls back to the default instead of taking the

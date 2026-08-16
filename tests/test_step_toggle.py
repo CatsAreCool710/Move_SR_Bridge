@@ -427,6 +427,45 @@ class StepHookTest(unittest.TestCase):
         editor._on_release_step(stubs.FakeStep((1, 0)), True)
         self.assertEqual(self.announced, [(4, True)])
 
+    def test_unwrap_is_idempotent_and_does_not_cry_conflict(self):
+        # "was replaced by something else" is the documented signal that a
+        # foreign script has wrapped the note editor. Emitting it because
+        # we already unwrapped ourselves sends someone hunting a conflict
+        # that does not exist.
+        editor = stubs.FakeNoteEditor()
+        unwrap = self.m._install_step_hooks(editor, self._announce)
+        unwrap()
+        with mock.patch.object(self.m.logger, "warning") as warn:
+            unwrap()
+        self.assertFalse(warn.called)
+
+    def test_unremovable_listener_is_refused(self):
+        # Checking add_ but not remove_ would install a listener we can
+        # never take off again -- it outlives disconnect() and keeps the
+        # closure, and through it the control surface, alive.
+        editor = stubs.FakeNoteEditor()
+        editor.remove_clip_notes_listener = None
+        self.assertIsNone(self.m._install_step_hooks(editor, self._announce))
+        self.assertNotIn("_on_release_step", vars(editor))
+        self.assertEqual(editor._listeners, [])
+
+    def test_failed_subscription_rolls_the_wrapper_back(self):
+        # Resolving the lookups up front is not the same as the mutations
+        # being atomic. If add_clip_notes_listener raises after the wrapper
+        # is installed, the caller gets no unwrap callable and the wrapper
+        # is orphaned on the instance for the rest of the session.
+        editor = stubs.FakeNoteEditor()
+        editor.add_clip_notes_listener = mock.Mock(
+            side_effect=RuntimeError("boom")
+        )
+        self.assertIsNone(self.m._install_step_hooks(editor, self._announce))
+        self.assertNotIn(
+            "_on_release_step",
+            vars(editor),
+            "a failed subscription must not leave the wrapper behind",
+        )
+        self.assertNotIn(self.m._STEP_HOOK_MARKER, vars(editor))
+
     def test_no_note_editor(self):
         self.assertIsNone(self.m._install_step_hooks(None, self._announce))
 

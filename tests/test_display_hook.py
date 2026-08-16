@@ -16,8 +16,15 @@
 """
 Tests for what the installed display hook actually announces.
 
-Debounce is disabled so speech is synchronous and assertions are exact;
-the debounce path itself is covered in test_helper_lifecycle.py.
+Most classes here disable the debounce so speech is synchronous and
+assertions are exact; the debounce path itself is covered in
+test_helper_lifecycle.py.
+
+Three exceptions use a real timer on purpose, because what they assert is
+about timing: ConfigRobustnessTest falls back to the built-in defaults
+(300ms) and so waits for the announcement, and StepToggleWiringTest's
+preempt test needs a short live debounce to prove a queued announcement is
+cancelled rather than merely beaten.
 """
 
 import configparser
@@ -919,6 +926,63 @@ class ConfigRobustnessTest(unittest.TestCase):
         self._assert_hook_works({
             "debounce": {}, "logging": {}, "speech": {},
         })
+
+
+class InstallTailTest(unittest.TestCase):
+    """Once the patches are in, the teardown callable must reach the caller."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def test_a_failing_greeting_does_not_orphan_the_hooks(self):
+        # _try_install_hook only records the teardown if
+        # _install_display_hook *returns* it. Anything raising after
+        # display.display is patched -- a broken log handler, an
+        # unexpected sr_bridge failure -- leaves the display patch and the
+        # clip_notes listener installed with nothing able to remove them,
+        # and the next on_identified() installs a second copy on top.
+        rendered = []
+        display = types.SimpleNamespace(display=rendered.append)
+        editor = stubs.FakeNoteEditor()
+        surface = stubs.step_sequence_surface(
+            display=display, note_editor=editor
+        )
+        fake_bridge = types.SimpleNamespace(
+            speak=mock.Mock(side_effect=RuntimeError("socket gone")),
+            braille=[].append,
+            dialog=[].append,
+        )
+        cfg = configparser.ConfigParser()
+        cfg.read_dict({
+            "debounce": {"enabled": "false", "delay_ms": "0"},
+            "logging": {"level": "INFO"},
+            "speech": {"step_toggles": "true"},
+        })
+        patchers = [
+            mock.patch.object(self.m, "sr_bridge", fake_bridge, create=True),
+            mock.patch.dict(
+                sys.modules, {"Move_SR_Bridge.sr_bridge": fake_bridge}
+            ),
+            mock.patch.object(self.m, "_cfg", cfg),
+            mock.patch.object(self.m, "_dialog_is_open", lambda: False),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+        teardown = self.m._install_display_hook(surface)
+        self.assertIsNotNone(
+            teardown,
+            "the greeting failing must not cost the caller its teardown",
+        )
+        # And it must genuinely undo both patches.
+        teardown()
+        # assertEqual, not assertIs: `rendered.append` builds a fresh bound
+        # method object on every access, so identity is never satisfied.
+        self.assertEqual(display.display, rendered.append)
+        self.assertNotIn("_on_release_step", vars(editor))
+        self.assertEqual(editor._listeners, [])
 
 
 class StepToggleWiringTest(unittest.TestCase):

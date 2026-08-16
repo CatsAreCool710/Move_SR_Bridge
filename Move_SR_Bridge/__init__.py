@@ -1133,10 +1133,19 @@ def _install_step_hooks(note_editor, announce):
     # Resolve everything before mutating anything.  A partial install is
     # the worst outcome: a wrapper left on the instance with no unwrap
     # callable able to remove it.
-    if not callable(original_release) or not callable(add_listener):
+    #
+    # `remove_clip_notes_listener` is required as well as `add_`, not just
+    # the one we are about to call: subscribing with no way to unsubscribe
+    # installs a listener that outlives disconnect() and keeps this
+    # closure -- and through it the control surface -- alive.
+    if (
+        not callable(original_release)
+        or not callable(add_listener)
+        or not callable(remove_listener)
+    ):
         logger.warning(
-            "Move_SR_Bridge: Note editor is missing %s or "
-            "add_clip_notes_listener, step toggles not announced",
+            "Move_SR_Bridge: Note editor is missing %s or the "
+            "clip_notes listener pair, step toggles not announced",
             _STEP_RELEASE_METHOD,
         )
         return None
@@ -1181,7 +1190,17 @@ def _install_step_hooks(note_editor, announce):
         except Exception as e:
             _log_failure("Step notes listener", e)
 
+    unwrapped = [False]
+
     def _unwrap():
+        # Idempotent, and not merely for tidiness: a second call would find
+        # the wrapper already gone and log "was replaced by something
+        # else", which is the signal documented for "another script is
+        # wrapping the note editor".  A false positive there sends someone
+        # hunting a conflict that does not exist.
+        if unwrapped[0]:
+            return
+        unwrapped[0] = True
         # Listener first -- it is the one that can still speak.
         try:
             if not callable(has_listener) or has_listener(_on_clip_notes):
@@ -1213,8 +1232,24 @@ def _install_step_hooks(note_editor, announce):
         except AttributeError:
             pass
 
+    # Resolving the lookups up front is not the same as the mutations being
+    # atomic.  If subscribing fails after the wrapper is on the instance,
+    # the caller gets no unwrap callable and the wrapper is orphaned for
+    # the rest of the session -- so roll it back rather than leaving it.
     setattr(note_editor, _STEP_RELEASE_METHOD, _wrapped_on_release_step)
-    add_listener(_on_clip_notes)
+    try:
+        add_listener(_on_clip_notes)
+    except Exception as e:
+        try:
+            delattr(note_editor, _STEP_RELEASE_METHOD)
+        except AttributeError:
+            pass
+        logger.warning(
+            "Move_SR_Bridge: Could not subscribe to clip notes (%s), step "
+            "toggles not announced",
+            e,
+        )
+        return None
     setattr(note_editor, _STEP_HOOK_MARKER, _unwrap)
     return _unwrap
 
@@ -1704,19 +1739,27 @@ def _install_display_hook(control_surface):
             _log_failure("Step hook install", e)
             step_toggles_status = "failed"
 
-    # Report what actually happened, not what was configured: this line is
-    # the project's primary support artefact and must not describe work it
-    # skipped.
-    logger.info(
-        "Move_SR_Bridge: Display hook installed (debounce=%s, delay=%dms, "
-        "step_toggles=%s)",
-        debounce_enabled,
-        int(debounce_delay * 1000),
-        step_toggles_status,
-    )
-
-    sr_bridge.speak("Move connected")
-    sr_bridge.braille("Move connected")
+    # Nothing past the patches above may escape this function.  The caller
+    # (`_try_install_hook`) records the teardown only if we *return* it, so
+    # an exception here -- a broken log handler, an unexpected sr_bridge
+    # failure -- would leave the display patch and the clip_notes listener
+    # installed with nothing able to remove them, and the next
+    # on_identified() would install a second copy on top.
+    try:
+        # Report what actually happened, not what was configured: this line
+        # is the project's primary support artefact and must not describe
+        # work it skipped.
+        logger.info(
+            "Move_SR_Bridge: Display hook installed (debounce=%s, "
+            "delay=%dms, step_toggles=%s)",
+            debounce_enabled,
+            int(debounce_delay * 1000),
+            step_toggles_status,
+        )
+        sr_bridge.speak("Move connected")
+        sr_bridge.braille("Move connected")
+    except Exception as e:
+        _log_failure("Hook install greeting", e)
     return _teardown
 
 
