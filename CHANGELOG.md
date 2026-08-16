@@ -38,6 +38,13 @@ cannot see it either.
   wrapped sentence.** A lowercase track or device name read as "1-Audio bass"
   instead of "1-Audio, bass". Only one screen on the device genuinely wraps a
   sentence, and it is now named rather than guessed at.
+- **No config.ini can cost you the control surface.** Every setting is now
+  read through one guarded helper, so a missing section, a missing option or
+  an unparseable value falls back to the default instead of taking the
+  display hook down with it. The `[debounce]` settings in particular would
+  have broken this way if their section went missing -- which is exactly what
+  happens to an existing config.ini when a new section is added, since the
+  file is never rewritten once it exists.
 
 ### Development
 

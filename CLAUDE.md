@@ -57,9 +57,23 @@ Three ways in, none of which `config.py`'s own `except configparser.Error` catch
 - **`UnicodeDecodeError` is not a `configparser.Error`.** It is a `ValueError`. Saving `config.ini` from Notepad in its default ANSI encoding with any accented character in it -- in a comment is enough -- makes `read(encoding="utf-8")` raise it straight through the handler.
 - **`getattr(logging, name)` finds any module attribute.** `level = BASIC_FORMAT` returns a format *string*, and `setLevel()` raises `ValueError` on it. So the check is `isinstance(level, int)`, not a `None` test. `NOTSET` is rejected too: `setLevel(0)` means "inherit", which silently drops everything below WARNING -- the same invisible outcome by a different route.
 
-- **`NoSectionError` on a key added after the user's `config.ini` was written.** `config.py` writes `_DEFAULT_CONFIG` **only when the file does not exist**, so everyone upgrading keeps a file with no `[speech]` section. `_DEFAULTS`/`read_dict` covers that in practice, but a bare `_cfg.getboolean("speech", ...)` raises `NoSectionError`, which is a `configparser.Error` and **not** a `ValueError` -- so it escapes the `except ValueError` beside it, escapes `_install_display_hook`, is caught by `_try_install_hook`, and costs the user the whole display hook. **Rule: every config read uses `fallback=`.** The existing `[debounce]` reads still do not and would break the same way if their section went missing; retrofitting them is a separate change.
+- **`NoSectionError` / `NoOptionError` on a key added after the user's `config.ini` was written.** `config.py` writes `_DEFAULT_CONFIG` **only when the file does not exist**, so everyone upgrading keeps a file that predates any key added since. A bare `_cfg.getboolean("speech", ...)` raises `NoSectionError`, which is a `configparser.Error` and **not** a `ValueError` -- so it escapes an `except ValueError` beside it, escapes `_install_display_hook`, is caught by `_try_install_hook`, and costs the user the whole display hook.
 
-`tests/test_config.py` covers the first two, each in its own interpreter, since the config is read once at import and cached. `tests/test_display_hook.py` covers the third by installing the hook against a config with no `[speech]` section at all.
+**Every config read in `__init__.py` goes through `_cfg_value(section, option, default)`.** That is the rule, and it is structural rather than a convention to remember, because the convention was forgotten twice. It exists because the three failures are not one exception family:
+
+| Failure | Raises | Rescued by |
+|---|---|---|
+| missing section | `NoSectionError` | `fallback=` |
+| missing option | `NoOptionError` | `fallback=` |
+| malformed value | `ValueError` | the `except` |
+
+`fallback=` does **not** rescue a malformed value and the `except` does **not** rescue it quietly -- both are needed. The catch-all alone would return the right value for a missing section, but would warn on every launch for every upgrading user, so `fallback=` is what buys *silence* on the normal upgrade path. `tests/test_display_hook.py` asserts exactly that (a missing section must not warn), because asserting the returned value alone passes with or without it.
+
+The getter is chosen from the **type of the default**, keyed on exact `type()` rather than `isinstance` -- `bool` is a subclass of `int`, and `True` must reach `getboolean`, not `getint`.
+
+`tests/test_config.py` covers the first two failure modes above, each in its own interpreter, since the config is read once at import and cached. `tests/test_display_hook.py` drives the whole of `_install_display_hook` against a **completely empty** config, one with every value malformed, and one with empty sections -- the guarantee wanted is about the file, not any single setting.
+
+`sr_helper.py` reads only the log level, already inside a total `except Exception` with `fallback=`, so it needs no equivalent.
 
 ## File Layout
 

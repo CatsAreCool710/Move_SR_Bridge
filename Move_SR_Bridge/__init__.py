@@ -118,6 +118,62 @@ def _fallback_config():
     return cfg
 
 
+# Getter chosen from the type of the default, so a setting's default and
+# the way it is parsed can never disagree.  Keyed on exact type, not
+# isinstance: bool is a subclass of int, and `True` must reach getboolean.
+_CFG_GETTERS = {
+    bool: "getboolean",
+    int: "getint",
+    float: "getfloat",
+    str: "get",
+}
+
+
+def _cfg_value(section, option, default):
+    """One config setting, or `default`.  Never raises -- read the note.
+
+    **Every config read in this file goes through here**, and that is the
+    point.  These reads happen inside `_install_display_hook`, so anything
+    that escapes is caught by `_try_install_hook` and costs the user the
+    display hook -- the entire feature -- because one setting could not be
+    parsed.  No individual setting is worth that.
+
+    Three distinct failures, and they are *not* one exception family,
+    which is exactly why hand-written reads kept getting it wrong:
+
+      * missing section  -> `NoSectionError`  (a `configparser.Error`)
+      * missing option   -> `NoOptionError`   (a `configparser.Error`)
+      * malformed value  -> `ValueError`      (from getboolean/getint)
+
+    `fallback=` rescues the first two but **not** the third, and an
+    `except ValueError` rescues the third but **not** the first two.  Both
+    are needed, and getting only one of them is what shipped twice.
+
+    A missing section is the *normal* case, not a fault: `config.py`
+    writes `_DEFAULT_CONFIG` only when the file does not exist, so every
+    user upgrading keeps a `config.ini` that predates any key added since.
+    That is why a missing section is not warned about, while a value that
+    is present but unparseable is.
+    """
+    getter_name = _CFG_GETTERS.get(type(default))
+    if getter_name is None:
+        return default
+    try:
+        return getattr(_cfg, getter_name)(section, option, fallback=default)
+    except Exception as e:
+        # ValueError from a malformed value, configparser.Error from a
+        # malformed file, and anything a future configparser may raise.
+        logger.warning(
+            "Move_SR_Bridge: Invalid [%s] %s in config.ini (%s), using "
+            "default (%r)",
+            section,
+            option,
+            e,
+            default,
+        )
+        return default
+
+
 # Why the level ended up where it did, reported once logging is up.  A
 # silently-INFO script hides every DEBUG trace, which is indistinguishable
 # from "the hook never ran" in the log -- the project's only support
@@ -1316,39 +1372,13 @@ def _install_display_hook(control_surface):
     # {"screens": set, "spoken": set} for the dialog currently open, or
     # None when none is.  See the dialog branch below.
     dialog_screens = [None]
-    try:
-        debounce_enabled = _cfg.getboolean("debounce", "enabled")
-    except ValueError:
-        logger.warning(
-            "Move_SR_Bridge: Invalid 'enabled' value in config.ini, "
-            "using default (true)"
-        )
-        debounce_enabled = True
-    try:
-        debounce_delay = _cfg.getint("debounce", "delay_ms") / 1000.0
-    except ValueError:
-        logger.warning(
-            "Move_SR_Bridge: Invalid 'delay_ms' value in config.ini, "
-            "using default (300)"
-        )
-        debounce_delay = 0.3
-    # fallback= is load-bearing, and is a rule for every future key here.
-    # config.py only writes _DEFAULT_CONFIG when the file does not exist, so
-    # everyone upgrading keeps a config.ini with no [speech] section.
-    # _DEFAULTS/read_dict covers that in practice, but NoSectionError is a
-    # configparser.Error, NOT a ValueError -- a bare read would escape this
-    # handler, escape _install_display_hook, be caught by _try_install_hook
-    # and cost the user the display hook entirely.
-    try:
-        step_toggles_enabled = _cfg.getboolean(
-            "speech", "step_toggles", fallback=True
-        )
-    except ValueError:
-        logger.warning(
-            "Move_SR_Bridge: Invalid 'step_toggles' value in config.ini, "
-            "using default (true)"
-        )
-        step_toggles_enabled = True
+    # Every setting read through _cfg_value: a missing section, a missing
+    # option or an unparseable value must never cost the user the hook.
+    # A negative delay_ms needs no clamp -- the dispatch below requires
+    # `debounce_delay > 0`, so it degrades to speaking immediately.
+    debounce_enabled = _cfg_value("debounce", "enabled", True)
+    debounce_delay = _cfg_value("debounce", "delay_ms", 300) / 1000.0
+    step_toggles_enabled = _cfg_value("speech", "step_toggles", True)
     _step_unwrap = [None]
     _debounce_timer = [None]
     _pending_text = [None]

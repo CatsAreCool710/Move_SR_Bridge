@@ -24,6 +24,7 @@ import configparser
 import os
 import sys
 import threading
+import time
 import types
 import unittest
 
@@ -770,6 +771,154 @@ class UrgentBypassTest(unittest.TestCase):
             ["Press wheel to shut down"],
             "the queued announcement must be dropped, not spoken after",
         )
+
+
+class ConfigValueTest(unittest.TestCase):
+    """_cfg_value: the one place a config read can fail."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def _with_config(self, mapping):
+        cfg = configparser.ConfigParser()
+        cfg.read_dict(mapping)
+        patcher = mock.patch.object(self.m, "_cfg", cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_reads_a_present_value(self):
+        self._with_config({"debounce": {"enabled": "false", "delay_ms": "50"}})
+        self.assertIs(self.m._cfg_value("debounce", "enabled", True), False)
+        self.assertEqual(self.m._cfg_value("debounce", "delay_ms", 300), 50)
+
+    def test_missing_section_returns_the_default_quietly(self):
+        # The normal case for anyone upgrading: config.py only writes the
+        # file when it does not exist, so an old config.ini has no [speech].
+        #
+        # The catch-all would return the default here even without
+        # `fallback=`, so asserting the value alone proves nothing. What
+        # `fallback=` actually buys is *silence*: without it every
+        # upgrading user gets a spurious warning on every launch for a
+        # config that is doing nothing wrong.
+        self._with_config({"logging": {"level": "INFO"}})
+        with mock.patch.object(self.m.logger, "warning") as warn:
+            self.assertIs(self.m._cfg_value("speech", "step_toggles", True), True)
+        self.assertFalse(
+            warn.called,
+            "a missing section is the normal upgrade path, not a fault",
+        )
+
+    def test_missing_option_returns_the_default_quietly(self):
+        self._with_config({"speech": {}})
+        with mock.patch.object(self.m.logger, "warning") as warn:
+            self.assertIs(self.m._cfg_value("speech", "step_toggles", True), True)
+        self.assertFalse(warn.called)
+
+    def test_malformed_value_returns_the_default_and_warns(self):
+        # fallback= does NOT rescue this one -- only the except does.
+        self._with_config({"speech": {"step_toggles": "banana"}})
+        with mock.patch.object(self.m.logger, "warning") as warn:
+            self.assertIs(self.m._cfg_value("speech", "step_toggles", True), True)
+        self.assertTrue(warn.called)
+
+    def test_malformed_int_returns_the_default(self):
+        self._with_config({"debounce": {"delay_ms": "soon"}})
+        self.assertEqual(self.m._cfg_value("debounce", "delay_ms", 300), 300)
+
+    def test_bool_default_uses_getboolean_not_getint(self):
+        # bool is a subclass of int, so an isinstance-keyed lookup can send
+        # True to getint and raise on "true". The mapping is keyed on exact
+        # type for this reason.
+        self._with_config({"speech": {"step_toggles": "false"}})
+        self.assertIs(self.m._cfg_value("speech", "step_toggles", True), False)
+
+    def test_never_raises_on_a_hostile_parser(self):
+        class Hostile(object):
+            def getboolean(self, *a, **k):
+                raise RuntimeError("boom")
+
+        patcher = mock.patch.object(self.m, "_cfg", Hostile())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertIs(self.m._cfg_value("speech", "step_toggles", True), True)
+
+
+class ConfigRobustnessTest(unittest.TestCase):
+    """No config, however broken, may cost the user the display hook.
+
+    These drive the whole of _install_display_hook rather than one read,
+    because the guarantee wanted is about the file, not a single setting.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = stubs.import_bridge()
+
+    def _install_with(self, mapping):
+        spoken = []
+        rendered = []
+        display = types.SimpleNamespace(display=rendered.append)
+        surface = types.SimpleNamespace(display=display, song=None)
+        fake_bridge = types.SimpleNamespace(
+            speak=spoken.append, braille=[].append, dialog=[].append
+        )
+        cfg = configparser.ConfigParser()
+        cfg.read_dict(mapping)
+        patchers = [
+            mock.patch.object(self.m, "sr_bridge", fake_bridge, create=True),
+            mock.patch.dict(
+                sys.modules, {"Move_SR_Bridge.sr_bridge": fake_bridge}
+            ),
+            mock.patch.object(self.m, "_cfg", cfg),
+            mock.patch.object(self.m, "_dialog_is_open", lambda: False),
+        ]
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        teardown = self.m._install_display_hook(surface)
+        if teardown is not None:
+            self.addCleanup(teardown)
+        return teardown, display, spoken, rendered
+
+    def _assert_hook_works(self, mapping):
+        """Install against `mapping` and prove the hook is alive.
+
+        Falling back to the built-in defaults means the debounce is on at
+        300ms, so speech is queued rather than immediate -- wait for it
+        rather than assuming, since asserting only on the install would
+        pass against a hook that speaks nothing.
+        """
+        teardown, display, spoken, rendered = self._install_with(mapping)
+        self.assertIsNotNone(
+            teardown, "a bad config.ini must not cost the display hook"
+        )
+        del spoken[:]
+        del rendered[:]
+        display.display(stubs.Content(lines=["Still working"]))
+        # Live's own rendering is unconditional and immediate.
+        self.assertEqual(len(rendered), 1, "the OLED must keep working")
+        deadline = time.time() + 3.0
+        while not spoken and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(spoken, ["Still working"])
+
+    def test_completely_empty_config_still_installs(self):
+        # The strongest form of the guarantee: not one section present, so
+        # every read in the function takes the missing-section path.
+        self._assert_hook_works({})
+
+    def test_every_value_malformed_still_installs(self):
+        self._assert_hook_works({
+            "debounce": {"enabled": "banana", "delay_ms": "soon"},
+            "logging": {"level": "LOUD"},
+            "speech": {"step_toggles": "perhaps"},
+        })
+
+    def test_sections_present_but_empty_still_installs(self):
+        self._assert_hook_works({
+            "debounce": {}, "logging": {}, "speech": {},
+        })
 
 
 class StepToggleWiringTest(unittest.TestCase):

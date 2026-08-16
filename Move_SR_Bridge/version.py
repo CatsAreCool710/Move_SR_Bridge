@@ -25,4 +25,4 @@ release workflow (.github/workflows/build.yml) asserts the two match and
 fails the release if they have drifted.
 """
 
-__version__ = "1.7.0.dev1"
+__version__ = "1.7.0.dev2"
